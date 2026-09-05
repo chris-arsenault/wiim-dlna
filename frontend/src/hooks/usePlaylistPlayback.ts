@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { api } from "../api/client";
-import { useDeviceStore } from "../stores/deviceStore";
+import { selectPlaybackDevice, useDeviceStore } from "../stores/deviceStore";
 import { usePlayerStore } from "../stores/playerStore";
 
 interface PlayOptions {
@@ -8,15 +8,15 @@ interface PlayOptions {
   startTrackId?: string;
 }
 
-/** Plays a saved playlist on the active device, optionally shuffled. */
+/** Plays a saved playlist on the shared Airwave stream, optionally shuffled. */
 export function usePlaylistPlayback(onPlay?: () => void) {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
+  const canPlay = useDeviceStore((state) => selectPlaybackDevice(state.devices) != null);
   const setPlaying = usePlayerStore((s) => s.setPlaying);
 
   const play = useCallback(
     async (playlistId: number, options: PlayOptions = {}) => {
-      if (!activeDeviceId) return;
-      await api.sessionPlay(activeDeviceId, {
+      if (!canPlay) return;
+      await api.sessionPlay({
         source_id: api.playlistSourceId(playlistId),
         start_track_id: options.startTrackId,
         shuffle: options.shuffle ? "tracks" : undefined,
@@ -24,8 +24,8 @@ export function usePlaylistPlayback(onPlay?: () => void) {
       setPlaying(true);
       onPlay?.();
     },
-    [activeDeviceId, setPlaying, onPlay]
+    [canPlay, setPlaying, onPlay]
   );
 
-  return { canPlay: !!activeDeviceId, play };
+  return { canPlay, play };
 }

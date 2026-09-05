@@ -10,7 +10,7 @@ const items: NavItem[] = [
   { id: "library", label: "Library", icon: <LibraryIcon /> },
   { id: "playlists", label: "Lists", icon: <PlaylistIcon /> },
   { id: "queue", label: "Queue", icon: <QueueIcon /> },
-  { id: "devices", label: "Rooms", icon: <DevicesIcon /> },
+  { id: "devices", label: "Speakers", icon: <DevicesIcon /> },
   { id: "settings", label: "EQ", icon: <SettingsIcon /> },
 ];
 

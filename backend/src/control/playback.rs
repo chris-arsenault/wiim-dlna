@@ -1,7 +1,6 @@
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use tracing::debug;
 
 use crate::media::library::LibraryObject;
 use crate::wiim::device::WiimDevice;
@@ -9,47 +8,24 @@ use crate::wiim::device::WiimDevice;
 use super::models::{
     PlayRequest, PlaybackStateResponse, QueueAddRequest, QueueMoveRequest, QueueStateResponse,
     QueueTrackResponse, RateTrackRequest, RepeatModeRequest, SeekRequest, SessionInfoResponse,
-    SessionPlayRequest, ShuffleModeRequest,
+    SessionPlayRequest, ShuffleModeRequest, VolumeRequest,
 };
 use super::session::{PlaySession, RepeatMode, SessionSource, ShuffleMode};
-use super::state::ControlState;
+use super::state::{ControlState, PLAYBACK_TARGET_ID};
 
 /// Saved playlists are addressed as `pl{id}`; library object IDs never use that prefix.
 fn playlist_source_id(source_id: &str) -> Option<i64> {
     source_id.strip_prefix("pl")?.parse().ok()
 }
 
-/// Resolve a target device ID to the master device for playback.
-/// If the target is a slave, routes to the master instead.
-/// Returns (effective_target_id, device) where device is the master.
-fn resolve_playback_target(
-    state: &ControlState,
-    target: &str,
-) -> Result<(String, WiimDevice), StatusCode> {
-    let master_id = state
-        .devices
-        .master_id_for(target)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if master_id != target {
-        debug!(
-            "Playback target {} is a slave, routing to master {}",
-            target, master_id
-        );
-    }
-
-    let device = state.devices.get(&master_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok((master_id, device))
+fn resolve_playback_device(state: &ControlState) -> Result<WiimDevice, StatusCode> {
+    super::outputs::playback_device(&state.devices).ok_or(StatusCode::CONFLICT)
 }
 
-pub async fn get_state(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<Json<PlaybackStateResponse>, StatusCode> {
-    let (target, device) = resolve_playback_target(&state, &target)?;
+pub async fn get_state(State(state): State<ControlState>) -> Json<PlaybackStateResponse> {
+    let device = super::outputs::playback_device(&state.devices);
 
-    // Use standard UPnP actions that work with any MediaRenderer
-    let (playing, elapsed, duration) = if device.capabilities.av_transport {
+    let (playing, elapsed, duration) = if let Some(device) = &device {
         let transport = device.av_transport.get_transport_info().await.ok();
         let position = device.av_transport.get_position_info().await.ok();
 
@@ -73,7 +49,7 @@ pub async fn get_state(
 
     // Check for active session first, fall back to queue.
     let (current_track, position, queue_length, shuffle_mode, repeat_mode, session_info) = {
-        let session_lock = state.sessions.get_or_create(&target);
+        let session_lock = state.sessions.get_or_create(PLAYBACK_TARGET_ID);
         let session_guard = session_lock.read();
         if let Some(ref session) = *session_guard {
             let track = session.current_track_id().and_then(|tid| {
@@ -107,7 +83,7 @@ pub async fn get_state(
                 Some(info),
             )
         } else {
-            let queue = state.queues.get_or_create(&target);
+            let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
             let q = queue.read();
             (
                 q.current().cloned(),
@@ -121,7 +97,7 @@ pub async fn get_state(
     };
 
     // Fetch allowed transport actions (Phase 4)
-    let allowed_actions = if device.capabilities.av_transport {
+    let allowed_actions = if let Some(device) = &device {
         device
             .av_transport
             .get_current_transport_actions()
@@ -131,8 +107,8 @@ pub async fn get_state(
         None
     };
 
-    Ok(Json(PlaybackStateResponse {
-        target_id: target,
+    Json(PlaybackStateResponse {
+        target_id: PLAYBACK_TARGET_ID.to_string(),
         playing,
         current_track,
         position,
@@ -143,15 +119,14 @@ pub async fn get_state(
         duration_seconds: duration,
         session: session_info,
         allowed_actions,
-    }))
+    })
 }
 
 pub async fn play(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<PlayRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, device) = resolve_playback_target(&state, &target)?;
+    let device = resolve_playback_device(&state)?;
     let start_index = body.start_index.unwrap_or(0);
 
     // Resolve track IDs from the request — supports single track, multiple tracks, or container
@@ -192,7 +167,7 @@ pub async fn play(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let queue = state.queues.get_or_create(&target);
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     {
         let mut q = queue.write();
         q.set_tracks(tracks, start_index);
@@ -219,7 +194,7 @@ pub async fn play(
 
     state.events.publish(
         "playback_started",
-        &serde_json::json!({ "device_id": target }),
+        &serde_json::json!({ "target_id": PLAYBACK_TARGET_ID }),
     );
 
     Ok(StatusCode::OK)
@@ -263,11 +238,8 @@ fn collect_tracks_recursive(
     }
 }
 
-pub async fn stop(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (target, device) = resolve_playback_target(&state, &target)?;
+pub async fn stop(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .stop()
@@ -275,16 +247,13 @@ pub async fn stop(
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     state.events.publish(
         "playback_stopped",
-        &serde_json::json!({ "device_id": target }),
+        &serde_json::json!({ "target_id": PLAYBACK_TARGET_ID }),
     );
     Ok(StatusCode::OK)
 }
 
-pub async fn pause(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+pub async fn pause(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .pause()
@@ -293,11 +262,8 @@ pub async fn pause(
     Ok(StatusCode::OK)
 }
 
-pub async fn resume(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+pub async fn resume(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .play()
@@ -306,11 +272,40 @@ pub async fn resume(
     Ok(StatusCode::OK)
 }
 
-pub async fn next_track(
+pub async fn set_volume(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
+    Json(body): Json<VolumeRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+    if !(0.0..=1.0).contains(&body.volume) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let device = resolve_playback_device(&state)?;
+    let volume = (body.volume * 100.0).round() as u32;
+
+    // WiiM firmware propagates SOAP SetVolume on the group master to every
+    // follower. Disabled speakers have already been detached from this group.
+    device
+        .rendering
+        .set_volume(volume)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    for output in state.devices.list_all().into_iter().filter(|output| {
+        output.enabled && output.device_type == "wiim" && output.capabilities.rendering_control
+    }) {
+        state
+            .devices
+            .update(&output.id, |entry| entry.volume = body.volume);
+        state.events.publish(
+            "volume_changed",
+            &serde_json::json!({ "device_id": output.id, "volume": body.volume }),
+        );
+    }
+    Ok(StatusCode::OK)
+}
+
+pub async fn next_track(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .next()
@@ -319,11 +314,8 @@ pub async fn next_track(
     Ok(StatusCode::OK)
 }
 
-pub async fn prev_track(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+pub async fn prev_track(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .previous()
@@ -334,10 +326,9 @@ pub async fn prev_track(
 
 pub async fn seek(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<SeekRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+    let device = resolve_playback_device(&state)?;
     let target_time = format_duration(body.position_seconds);
     device
         .av_transport
@@ -349,35 +340,24 @@ pub async fn seek(
 
 pub async fn set_shuffle(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<ShuffleModeRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, _device) = resolve_playback_target(&state, &target)?;
-    let queue = state.queues.get_or_create(&target);
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     queue.write().set_shuffle_mode(body.mode);
     Ok(StatusCode::OK)
 }
 
 pub async fn set_repeat(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<RepeatModeRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, _device) = resolve_playback_target(&state, &target)?;
-    let queue = state.queues.get_or_create(&target);
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     queue.write().set_repeat_mode(body.mode);
     Ok(StatusCode::OK)
 }
 
-pub async fn get_queue(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Json<QueueStateResponse> {
-    let target = state
-        .devices
-        .master_id_for(&target)
-        .unwrap_or(target.clone());
-    let queue = state.queues.get_or_create(&target);
+pub async fn get_queue(State(state): State<ControlState>) -> Json<QueueStateResponse> {
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     let q = queue.read();
     Json(QueueStateResponse {
         tracks: q.tracks().to_vec(),
@@ -387,13 +367,8 @@ pub async fn get_queue(
 
 pub async fn add_to_queue(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<QueueAddRequest>,
 ) -> StatusCode {
-    let target = state
-        .devices
-        .master_id_for(&target)
-        .unwrap_or(target.clone());
     let library = state.library.read();
     let mut tracks = Vec::new();
     for id in &body.track_ids {
@@ -413,45 +388,31 @@ pub async fn add_to_queue(
     }
     drop(library);
 
-    let queue = state.queues.get_or_create(&target);
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     queue.write().add_tracks(tracks, &body.position);
-    publish_queue_changed(&state, &target);
+    publish_queue_changed(&state);
     StatusCode::OK
 }
 
 pub async fn remove_from_queue(
     State(state): State<ControlState>,
-    Path((target, index)): Path<(String, usize)>,
+    axum::extract::Path(index): axum::extract::Path<usize>,
 ) -> StatusCode {
-    let target = state
-        .devices
-        .master_id_for(&target)
-        .unwrap_or(target.clone());
-    let queue = state.queues.get_or_create(&target);
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     queue.write().remove_track(index);
-    publish_queue_changed(&state, &target);
+    publish_queue_changed(&state);
     StatusCode::OK
 }
 
-pub async fn clear_queue(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> StatusCode {
-    let target = state
-        .devices
-        .master_id_for(&target)
-        .unwrap_or(target.clone());
-    let queue = state.queues.get_or_create(&target);
+pub async fn clear_queue(State(state): State<ControlState>) -> StatusCode {
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     queue.write().clear();
-    publish_queue_changed(&state, &target);
+    publish_queue_changed(&state);
     StatusCode::OK
 }
 
-pub async fn seek_forward(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+pub async fn seek_forward(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .seek_forward()
@@ -460,11 +421,8 @@ pub async fn seek_forward(
     Ok(StatusCode::OK)
 }
 
-pub async fn seek_backward(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+pub async fn seek_backward(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
     device
         .av_transport
         .seek_backward()
@@ -475,25 +433,22 @@ pub async fn seek_backward(
 
 pub async fn move_in_queue(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<QueueMoveRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, _device) = resolve_playback_target(&state, &target)?;
-    let queue = state.queues.get_or_create(&target);
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     let moved = queue.write().move_track(body.from_index, body.to_index);
     if !moved {
         return Err(StatusCode::BAD_REQUEST);
     }
-    publish_queue_changed(&state, &target);
+    publish_queue_changed(&state);
     Ok(StatusCode::OK)
 }
 
 pub async fn rate_track(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<RateTrackRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (_target, device) = resolve_playback_target(&state, &target)?;
+    let device = resolve_playback_device(&state)?;
     if body.rating > 5 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -506,13 +461,13 @@ pub async fn rate_track(
 }
 
 /// Publish the full queue state so frontends can update without re-fetching.
-fn publish_queue_changed(state: &ControlState, target_id: &str) {
-    let queue = state.queues.get_or_create(target_id);
+fn publish_queue_changed(state: &ControlState) {
+    let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
     let q = queue.read();
     state.events.publish(
         "queue_changed",
         &serde_json::json!({
-            "device_id": target_id,
+            "target_id": PLAYBACK_TARGET_ID,
             "tracks": q.tracks(),
             "position": q.position(),
         }),
@@ -569,10 +524,9 @@ fn session_to_info(session: &PlaySession) -> SessionInfoResponse {
 
 pub async fn session_play(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<SessionPlayRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, device) = resolve_playback_target(&state, &target)?;
+    let device = resolve_playback_device(&state)?;
 
     let session = match playlist_source_id(&body.source_id) {
         Some(playlist_id) => {
@@ -633,11 +587,11 @@ pub async fn session_play(
 
     // Store session, clear queue for this device (mutual exclusion).
     {
-        let lock = state.sessions.get_or_create(&target);
+        let lock = state.sessions.get_or_create(PLAYBACK_TARGET_ID);
         *lock.write() = Some(session);
     }
     {
-        let queue = state.queues.get_or_create(&target);
+        let queue = state.queues.get_or_create(PLAYBACK_TARGET_ID);
         queue.write().clear();
     }
 
@@ -656,7 +610,7 @@ pub async fn session_play(
     state.events.publish(
         "session_started",
         &serde_json::json!({
-            "device_id": target,
+            "target_id": PLAYBACK_TARGET_ID,
             "session": info,
             "track": { "id": track_id }
         }),
@@ -665,14 +619,11 @@ pub async fn session_play(
     Ok(StatusCode::OK)
 }
 
-pub async fn session_next(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (target, device) = resolve_playback_target(&state, &target)?;
+pub async fn session_next(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
 
     let next_track_id = {
-        let lock = state.sessions.get_or_create(&target);
+        let lock = state.sessions.get_or_create(PLAYBACK_TARGET_ID);
         let mut guard = lock.write();
         match guard.as_mut() {
             Some(session) => session.advance(),
@@ -708,29 +659,27 @@ pub async fn session_next(
             state.events.publish(
                 "track_changed",
                 &serde_json::json!({
-                    "device_id": target,
+                    "target_id": PLAYBACK_TARGET_ID,
                     "track": { "id": track_id, "title": title, "artist": artist }
                 }),
             );
             Ok(StatusCode::OK)
         }
         None => {
-            state
-                .events
-                .publish("session_ended", &serde_json::json!({ "device_id": target }));
+            state.events.publish(
+                "session_ended",
+                &serde_json::json!({ "target_id": PLAYBACK_TARGET_ID }),
+            );
             Ok(StatusCode::OK)
         }
     }
 }
 
-pub async fn session_prev(
-    State(state): State<ControlState>,
-    Path(target): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let (target, device) = resolve_playback_target(&state, &target)?;
+pub async fn session_prev(State(state): State<ControlState>) -> Result<StatusCode, StatusCode> {
+    let device = resolve_playback_device(&state)?;
 
     let prev_track_id = {
-        let lock = state.sessions.get_or_create(&target);
+        let lock = state.sessions.get_or_create(PLAYBACK_TARGET_ID);
         let mut guard = lock.write();
         match guard.as_mut() {
             Some(session) => session.go_back(),
@@ -765,7 +714,7 @@ pub async fn session_prev(
         state.events.publish(
             "track_changed",
             &serde_json::json!({
-                "device_id": target,
+                "target_id": PLAYBACK_TARGET_ID,
                 "track": { "id": track_id, "title": title, "artist": artist }
             }),
         );
@@ -776,13 +725,11 @@ pub async fn session_prev(
 
 pub async fn session_set_shuffle(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<ShuffleModeRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, _device) = resolve_playback_target(&state, &target)?;
     let mode: ShuffleMode = serde_json::from_value(serde_json::Value::String(body.mode))
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let lock = state.sessions.get_or_create(&target);
+    let lock = state.sessions.get_or_create(PLAYBACK_TARGET_ID);
     let mut guard = lock.write();
     match guard.as_mut() {
         Some(session) => {
@@ -795,13 +742,11 @@ pub async fn session_set_shuffle(
 
 pub async fn session_set_repeat(
     State(state): State<ControlState>,
-    Path(target): Path<String>,
     Json(body): Json<RepeatModeRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let (target, _device) = resolve_playback_target(&state, &target)?;
     let mode: RepeatMode = serde_json::from_value(serde_json::Value::String(body.mode))
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let lock = state.sessions.get_or_create(&target);
+    let lock = state.sessions.get_or_create(PLAYBACK_TARGET_ID);
     let mut guard = lock.write();
     match guard.as_mut() {
         Some(session) => {

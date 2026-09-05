@@ -22,7 +22,8 @@ The backend authenticates to
 `https://collector.local.ahara.io:8443` with the secret mapped from
 `/ahara/airwave/collector/api-token`. It polls native renderer inventory and
 uses only the collector's device-ID routes for UPnP and LinkPlay commands.
-Airwave still parses every response and owns playback, grouping, and EQ.
+Airwave still parses every response and owns the singleton playback state,
+desired output membership, physical WiiM grouping, and EQ.
 
 Airwave renews a lease for its existing MediaServer identity. The collector
 answers WiiM SSDP searches and sends the five UPnP advertisements on the IoT

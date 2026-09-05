@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type EqBand } from "../../api/client";
+import { api, type Device, type EqBand } from "../../api/client";
 import { useDeviceStore } from "../../stores/deviceStore";
 import { AudioTab } from "./AudioTab";
 
@@ -43,16 +43,18 @@ function tabLabel(tab: string): string {
 }
 
 export function EQSettings() {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
-  const activeDevice = useDeviceStore((s) => s.devices.find((d) => d.id === s.activeDeviceId));
+  const devices = useDeviceStore((state) => state.devices);
+  const settingsDeviceId = useDeviceStore((state) => state.settingsDeviceId);
+  const setSettingsDevice = useDeviceStore((state) => state.setSettingsDevice);
+  const activeDevice = devices.find((device) => device.id === settingsDeviceId);
   const [activeTab, setActiveTab] = useState<"presets" | "bands" | "audio">("presets");
 
-  if (!activeDeviceId || !activeDevice) {
+  if (!settingsDeviceId || !activeDevice) {
     return (
       <div className="space-y-3">
         <h2 className="text-xl font-semibold">Settings</h2>
         <div className="text-center py-12 text-[var(--color-text-secondary)] text-sm">
-          No device selected
+          No WiiM speakers found
         </div>
       </div>
     );
@@ -62,7 +64,7 @@ export function EQSettings() {
     return (
       <div className="space-y-3">
         <h2 className="text-xl font-semibold">Settings</h2>
-        <DeviceHeader device={activeDevice} />
+        <DeviceHeader device={activeDevice} devices={devices} onSelect={setSettingsDevice} />
         <div className="text-center py-12">
           <div className="text-amber-400 text-sm font-medium mb-2">EQ Unavailable</div>
           <div className="text-xs text-[var(--color-text-secondary)]">
@@ -78,7 +80,7 @@ export function EQSettings() {
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold">Settings</h2>
-      <DeviceHeader device={activeDevice} />
+      <DeviceHeader device={activeDevice} devices={devices} onSelect={setSettingsDevice} />
 
       <div className="flex gap-1 bg-[var(--color-surface-elevated)] rounded-lg p-1">
         {(["presets", "bands", "audio"] as const).map((tab) => (
@@ -96,21 +98,39 @@ export function EQSettings() {
         ))}
       </div>
 
-      {activeTab === "presets" && <PresetsTab deviceId={activeDeviceId} />}
-      {activeTab === "bands" && <BandsTab deviceId={activeDeviceId} />}
-      {activeTab === "audio" && <AudioTab deviceId={activeDeviceId} />}
+      {activeTab === "presets" && <PresetsTab deviceId={settingsDeviceId} />}
+      {activeTab === "bands" && <BandsTab deviceId={settingsDeviceId} />}
+      {activeTab === "audio" && <AudioTab deviceId={settingsDeviceId} />}
     </div>
   );
 }
 
 function DeviceHeader({
   device,
+  devices,
+  onSelect,
 }: {
-  device: { name: string; ip: string; model: string | null; firmware: string | null };
+  device: Device;
+  devices: Device[];
+  onSelect: (id: string) => void;
 }) {
   return (
     <div className="bg-[var(--color-surface-elevated)] rounded-xl p-4">
-      <div className="text-sm font-medium">{device.name}</div>
+      <label className="block text-xs text-[var(--color-text-secondary)] mb-1" htmlFor="eq-device">
+        Speaker settings
+      </label>
+      <select
+        id="eq-device"
+        value={device.id}
+        onChange={(event) => onSelect(event.target.value)}
+        className="w-full bg-white/5 rounded-lg px-2 py-1.5 text-sm font-medium outline-none border border-white/10"
+      >
+        {devices.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.name}
+          </option>
+        ))}
+      </select>
       <div className="text-xs text-[var(--color-text-secondary)] mt-0.5">
         {device.ip}
         {device.model ? ` · ${device.model}` : ""}

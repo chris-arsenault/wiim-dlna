@@ -4,7 +4,7 @@ use axum::Json;
 
 use super::models::{
     ChannelRequest, DeviceCapabilitiesResponse, DeviceNameRequest, DeviceResponse,
-    LibraryStateRequest, LibraryStateResponse, SetEnabledRequest, VolumeRequest,
+    LibraryStateRequest, LibraryStateResponse, VolumeRequest,
 };
 use super::state::ControlState;
 
@@ -33,7 +33,9 @@ fn device_to_response(d: &crate::wiim::device::WiimDevice) -> DeviceResponse {
 }
 
 pub async fn list_devices(State(state): State<ControlState>) -> Json<Vec<DeviceResponse>> {
-    let devices = state.devices.list_all();
+    let mut devices = state.devices.list_all();
+    devices.retain(|device| device.device_type == "wiim");
+    devices.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     Json(devices.iter().map(device_to_response).collect())
 }
 
@@ -42,6 +44,9 @@ pub async fn get_device(
     Path(id): Path<String>,
 ) -> Result<Json<DeviceResponse>, StatusCode> {
     let d = state.devices.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    if d.device_type != "wiim" {
+        return Err(StatusCode::NOT_FOUND);
+    }
     Ok(Json(device_to_response(&d)))
 }
 
@@ -52,53 +57,26 @@ fn default_library_path() -> Vec<super::models::LibraryPathEntry> {
     }]
 }
 
-pub async fn get_library_state(
-    State(state): State<ControlState>,
-    Path(id): Path<String>,
-) -> Result<Json<LibraryStateResponse>, StatusCode> {
-    if !state.devices.contains(&id) {
-        return Err(StatusCode::NOT_FOUND);
-    }
+pub async fn get_library_state(State(state): State<ControlState>) -> Json<LibraryStateResponse> {
     let path = state
         .device_config
-        .load_library_path(&id)
+        .load_app_state("library_path")
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_else(default_library_path);
-    Ok(Json(LibraryStateResponse { path }))
+    Json(LibraryStateResponse { path })
 }
 
 pub async fn set_library_state(
     State(state): State<ControlState>,
-    Path(id): Path<String>,
     Json(body): Json<LibraryStateRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    if !state.devices.contains(&id) {
-        return Err(StatusCode::NOT_FOUND);
-    }
     let path = if body.path.is_empty() {
         default_library_path()
     } else {
         body.path
     };
     let json = serde_json::to_string(&path).map_err(|_| StatusCode::BAD_REQUEST)?;
-    state.device_config.save_library_path(&id, &json);
-    Ok(StatusCode::OK)
-}
-
-pub async fn set_enabled(
-    State(state): State<ControlState>,
-    Path(id): Path<String>,
-    Json(body): Json<SetEnabledRequest>,
-) -> Result<StatusCode, StatusCode> {
-    if !state.devices.contains(&id) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    state.devices.update(&id, |d| d.enabled = body.enabled);
-    state.device_config.save_enabled(&id, body.enabled);
-    state.events.publish(
-        "device_state",
-        &serde_json::json!({ "device_id": id, "enabled": body.enabled }),
-    );
+    state.device_config.save_app_state("library_path", &json);
     Ok(StatusCode::OK)
 }
 

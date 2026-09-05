@@ -1,5 +1,3 @@
-import { useDeviceStore } from "../../stores/deviceStore";
-
 interface Props {
   active: string | null;
   onNavigate: (id: string) => void;
@@ -9,13 +7,11 @@ const NAV_ITEMS = [
   { id: "library", label: "Library", icon: LibraryIcon },
   { id: "playlists", label: "Lists", icon: PlaylistIcon },
   { id: "queue", label: "Queue", icon: QueueIcon },
-  { id: "devices", label: "Rooms", icon: DevicesIcon },
+  { id: "devices", label: "Speakers", icon: DevicesIcon },
   { id: "settings", label: "EQ", icon: SettingsIcon },
 ];
 
 export function Sidebar({ active, onNavigate }: Props) {
-  const activeDevice = useDeviceStore((s) => s.devices.find((d) => d.id === s.activeDeviceId));
-
   return (
     <div className="app-sidebar h-full bg-[var(--color-surface-elevated)] border-r border-white/5 flex flex-col items-center py-4 gap-1">
       {NAV_ITEMS.map((item) => (
@@ -33,22 +29,6 @@ export function Sidebar({ active, onNavigate }: Props) {
           <span className="text-[9px] leading-none">{item.label}</span>
         </button>
       ))}
-
-      <div className="flex-1" />
-
-      {/* Device indicator at bottom */}
-      {activeDevice && (
-        <button
-          onClick={() => onNavigate("devices")}
-          className="w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-white/5 transition-colors"
-          title={activeDevice.name}
-        >
-          <div className="w-2 h-2 rounded-full bg-emerald-400" />
-          <span className="text-[8px] leading-none truncate w-10 text-center">
-            {activeDevice.name.split(" ")[0]}
-          </span>
-        </button>
-      )}
     </div>
   );
 }

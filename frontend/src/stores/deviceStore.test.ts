@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { useDeviceStore } from "./deviceStore";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { Device } from "../api/client";
+import { selectPlaybackDevice, useDeviceStore } from "./deviceStore";
 
-// Test-only device IP — not a production address
-const TEST_DEVICE_IP = `192.168.1.${10}`; // sonarjs/no-hardcoded-ip
+const TEST_DEVICE_IP = `192.168.1.${10}`;
 
 function makeDevice(overrides: Partial<Device> = {}): Device {
   return {
@@ -32,50 +31,58 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
 
 describe("deviceStore", () => {
   beforeEach(() => {
-    useDeviceStore.setState({ devices: [], activeDeviceId: null });
+    useDeviceStore.setState({ devices: [], settingsDeviceId: null });
   });
 
-  it("starts with empty devices and no active device", () => {
-    const { devices, activeDeviceId } = useDeviceStore.getState();
+  it("starts with no discovered WiiM speakers", () => {
+    const { devices, settingsDeviceId } = useDeviceStore.getState();
     expect(devices).toEqual([]);
-    expect(activeDeviceId).toBeNull();
+    expect(settingsDeviceId).toBeNull();
   });
 
-  it("setDevices stores devices and auto-selects first", () => {
-    const devices = [makeDevice({ id: "a" }), makeDevice({ id: "b" })];
-    useDeviceStore.getState().setDevices(devices);
+  it("filters non-WiiM renderers and selects the first WiiM for settings", () => {
+    useDeviceStore
+      .getState()
+      .setDevices([makeDevice({ id: "tv", device_type: "renderer" }), makeDevice({ id: "wiim" })]);
     const state = useDeviceStore.getState();
-    expect(state.devices).toHaveLength(2);
-    expect(state.activeDeviceId).toBe("a");
+    expect(state.devices.map((device) => device.id)).toEqual(["wiim"]);
+    expect(state.settingsDeviceId).toBe("wiim");
   });
 
-  it("setDevices preserves existing activeDeviceId if still present", () => {
-    useDeviceStore.setState({ activeDeviceId: "b" });
-    const devices = [makeDevice({ id: "a" }), makeDevice({ id: "b" })];
-    useDeviceStore.getState().setDevices(devices);
-    expect(useDeviceStore.getState().activeDeviceId).toBe("b");
-  });
-
-  it("setActiveDevice changes the active device", () => {
+  it("keeps the explicit settings device while it remains available", () => {
     useDeviceStore.getState().setDevices([makeDevice({ id: "a" }), makeDevice({ id: "b" })]);
-    useDeviceStore.getState().setActiveDevice("b");
-    expect(useDeviceStore.getState().activeDeviceId).toBe("b");
+    useDeviceStore.getState().setSettingsDevice("b");
+    useDeviceStore.getState().setDevices([makeDevice({ id: "a" }), makeDevice({ id: "b" })]);
+    expect(useDeviceStore.getState().settingsDeviceId).toBe("b");
   });
 
-  it("updateDevice merges partial updates", () => {
-    useDeviceStore.getState().setDevices([makeDevice({ id: "a", volume: 0.5, muted: false })]);
-    useDeviceStore.getState().updateDevice("a", { volume: 0.8, muted: true });
-    const device = useDeviceStore.getState().devices[0];
-    expect(device.volume).toBe(0.8);
-    expect(device.muted).toBe(true);
-    expect(device.name).toBe("Living Room"); // unchanged
+  it("derives playback from the enabled physical master", () => {
+    const devices = [
+      makeDevice({ id: "a", group_id: "a", is_master: true }),
+      makeDevice({ id: "b", group_id: "a" }),
+    ];
+    expect(selectPlaybackDevice(devices)?.id).toBe("a");
   });
 
-  it("updateDevice does not affect other devices", () => {
+  it("does not derive playback from disabled speakers", () => {
+    expect(selectPlaybackDevice([makeDevice({ enabled: false })])).toBeUndefined();
+  });
+
+  it("does not derive playback from a speaker without AVTransport", () => {
+    expect(
+      selectPlaybackDevice([
+        makeDevice({ capabilities: { ...makeDevice().capabilities, av_transport: false } }),
+      ])
+    ).toBeUndefined();
+  });
+
+  it("merges physical device updates without affecting other devices", () => {
     useDeviceStore
       .getState()
       .setDevices([makeDevice({ id: "a", volume: 0.5 }), makeDevice({ id: "b", volume: 0.3 })]);
-    useDeviceStore.getState().updateDevice("a", { volume: 0.9 });
+    useDeviceStore.getState().updateDevice("a", { volume: 0.9, muted: true });
+    expect(useDeviceStore.getState().devices[0].volume).toBe(0.9);
+    expect(useDeviceStore.getState().devices[0].muted).toBe(true);
     expect(useDeviceStore.getState().devices[1].volume).toBe(0.3);
   });
 });

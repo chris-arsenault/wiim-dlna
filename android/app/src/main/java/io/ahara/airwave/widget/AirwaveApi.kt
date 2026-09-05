@@ -13,6 +13,9 @@ data class AirwaveDevice(
     val name: String,
     val enabled: Boolean,
     val volume: Double,
+    val avTransport: Boolean,
+    val groupId: String?,
+    val isMaster: Boolean,
 )
 
 data class PlaybackState(
@@ -33,13 +36,21 @@ class AirwaveApi(
         return buildList {
             for (i in 0 until json.length()) {
                 val item = json.getJSONObject(i)
-                if (item.optBoolean("enabled", true)) {
+                if (item.optBoolean("enabled", true) && item.optString("device_type") == "wiim") {
                     add(
                         AirwaveDevice(
                             id = item.getString("id"),
                             name = item.optString("name", item.getString("id")),
                             enabled = true,
                             volume = item.optDouble("volume", 0.0),
+                            avTransport = item.optJSONObject("capabilities")
+                                ?.optBoolean("av_transport", false) == true,
+                            groupId = if (item.isNull("group_id")) {
+                                null
+                            } else {
+                                item.optString("group_id").ifBlank { null }
+                            },
+                            isMaster = item.optBoolean("is_master", false),
                         )
                     )
                 }
@@ -47,8 +58,8 @@ class AirwaveApi(
         }
     }
 
-    fun playback(deviceId: String): PlaybackState {
-        val json = JSONObject(request("GET", "/api/playback/${deviceId.urlPath()}"))
+    fun playback(): PlaybackState {
+        val json = JSONObject(request("GET", "/api/playback"))
         val track = json.optJSONObject("current_track")
         val session = json.optJSONObject("session")
         return PlaybackState(
@@ -60,23 +71,23 @@ class AirwaveApi(
         )
     }
 
-    fun pause(deviceId: String) {
-        request("POST", "/api/playback/${deviceId.urlPath()}/pause")
+    fun pause() {
+        request("POST", "/api/playback/pause")
     }
 
-    fun resume(deviceId: String) {
-        request("POST", "/api/playback/${deviceId.urlPath()}/resume")
+    fun resume() {
+        request("POST", "/api/playback/resume")
     }
 
-    fun next(deviceId: String) {
-        request("POST", "/api/playback/${deviceId.urlPath()}/next")
+    fun next() {
+        request("POST", "/api/playback/next")
     }
 
-    fun setVolume(deviceId: String, volume: Double) {
+    fun setVolume(volume: Double) {
         val clamped = max(0.0, min(1.0, volume))
         request(
             "POST",
-            "/api/devices/${deviceId.urlPath()}/volume",
+            "/api/playback/volume",
             JSONObject().put("volume", clamped).toString(),
         )
     }
@@ -108,6 +119,4 @@ class AirwaveApi(
         return text
     }
 
-    private fun String.urlPath(): String =
-        java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
 }

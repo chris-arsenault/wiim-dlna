@@ -20,7 +20,7 @@ vi.mock("./api/client", () => ({
     pause: vi.fn(() => Promise.resolve()),
     resume: vi.fn(() => Promise.resolve()),
     getSleepTimer: vi.fn(() => Promise.resolve({ remaining_seconds: null })),
-    getPresets: vi.fn(() => Promise.resolve({ presets: {} })),
+    getLibraryState: vi.fn(() => Promise.resolve({ path: [{ id: "0", title: "Library" }] })),
     artUrl: vi.fn((id: string) => `/api/art/${id}`),
   },
   setApiAuthToken: vi.fn(),
@@ -57,7 +57,7 @@ vi.mock("framer-motion", () => ({
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useDeviceStore.setState({ devices: [], activeDeviceId: null });
+    useDeviceStore.setState({ devices: [], settingsDeviceId: null });
     usePlayerStore.setState({ playing: false, currentTrack: null, session: null });
     useUiStore.setState({ drawer: null });
   });
@@ -82,7 +82,7 @@ describe("App", () => {
     const nav = screen.getByRole("navigation");
     expect(nav).toHaveTextContent("Library");
     expect(nav).toHaveTextContent("Queue");
-    expect(nav).toHaveTextContent("Rooms");
+    expect(nav).toHaveTextContent("Speakers");
     expect(nav).toHaveTextContent("EQ");
   });
 
@@ -97,17 +97,17 @@ describe("App", () => {
     });
   });
 
-  it("opens Rooms drawer on nav click", () => {
+  it("opens Speakers drawer on nav click", () => {
     renderWithProviders(<App />);
-    fireEvent.click(screen.getAllByText("Rooms")[0]);
-    expect(screen.getAllByText("Discovering devices...").length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(screen.getAllByText("Speakers")[0]);
+    expect(screen.getAllByText("Discovering WiiM speakers...").length).toBeGreaterThanOrEqual(1);
   });
 
   it("toggles drawer closed on second click", () => {
     renderWithProviders(<App />);
-    fireEvent.click(screen.getAllByText("Rooms")[0]);
-    expect(screen.getAllByText("Discovering devices...").length).toBeGreaterThanOrEqual(1);
-    fireEvent.click(screen.getAllByText("Rooms")[0]);
+    fireEvent.click(screen.getAllByText("Speakers")[0]);
+    expect(screen.getAllByText("Discovering WiiM speakers...").length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(screen.getAllByText("Speakers")[0]);
     expect(screen.getByText("Nothing playing")).toBeInTheDocument();
   });
 });

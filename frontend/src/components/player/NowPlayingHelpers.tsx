@@ -1,19 +1,16 @@
 import { useState, useEffect } from "react";
 import { api } from "../../api/client";
 import { usePlayerStore } from "../../stores/playerStore";
-import { useDeviceStore } from "../../stores/deviceStore";
 
 export function useSleepTimerSync() {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
   const setSleepRemaining = usePlayerStore((s) => s.setSleepRemaining);
   const sleepRemaining = usePlayerStore((s) => s.sleepRemaining);
 
-  // Fetch sleep timer state once when device changes
+  // Fetch the one global sleep timer on mount.
   useEffect(() => {
-    if (!activeDeviceId) return;
     let cancelled = false;
     api
-      .getSleepTimer(activeDeviceId)
+      .getSleepTimer()
       .then((res) => {
         if (!cancelled) setSleepRemaining(res.remaining_seconds);
       })
@@ -21,7 +18,7 @@ export function useSleepTimerSync() {
     return () => {
       cancelled = true;
     };
-  }, [activeDeviceId, setSleepRemaining]);
+  }, [setSleepRemaining]);
 
   // Local countdown
   const hasActiveSleep = sleepRemaining != null && sleepRemaining > 0;

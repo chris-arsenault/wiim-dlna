@@ -5,7 +5,7 @@ Player controls only — no library browsing, no voice.
 
 ## Controls
 
-- Tap the device name to cycle through enabled devices.
+- The header shows every enabled speaker in the shared playing group.
 - Volume down / volume up (5% steps).
 - Play / pause (toggles based on current state).
 - Next track.

@@ -45,7 +45,7 @@ describe("MiniPlayer", () => {
           is_master: false,
         },
       ],
-      activeDeviceId: "dev-1",
+      settingsDeviceId: "dev-1",
     });
   });
 

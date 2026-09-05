@@ -8,6 +8,7 @@ use super::events::EventBus;
 use super::models::QueueTrackResponse;
 use super::queue::QueueManager;
 use super::session::SessionManager;
+use super::state::PLAYBACK_TARGET_ID;
 use crate::media::library::{LibraryObject, SharedLibrary};
 use crate::wiim::device::DeviceManager;
 
@@ -24,22 +25,19 @@ pub async fn run_playback_monitor(
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     let mut last_states: HashMap<String, String> = HashMap::new();
     let mut initialized: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_playback_device: Option<String> = None;
 
     loop {
         interval.tick().await;
 
-        // Prune initialized set — re-sync settings if a device reconnects
+        let all_devices = devices.list_all();
         let current_device_ids: std::collections::HashSet<String> =
-            devices.list_all().iter().map(|d| d.id.clone()).collect();
+            all_devices.iter().map(|device| device.id.clone()).collect();
         initialized.retain(|id| current_device_ids.contains(id));
 
-        for device in devices.list_all() {
-            if !device.capabilities.av_transport {
-                continue;
-            }
-
-            // Poll volume/mute from device — catches changes from WiiM app,
-            // physical buttons, or firmware group-volume sync.
+        // Volume and mute remain physical-device settings even though playback
+        // is global, so keep every WiiM's rendering state current.
+        for device in &all_devices {
             if device.capabilities.rendering_control {
                 if let Ok(vol) = device.rendering.get_volume().await {
                     let new_vol = vol as f64 / 100.0;
@@ -61,118 +59,117 @@ pub async fn run_playback_monitor(
                     }
                 }
             }
+        }
 
-            // Skip slaves — only monitor master devices (slaves follow via firmware).
-            if device.group_id.is_some() && !device.is_master {
-                continue;
-            }
+        let Some(device) = super::outputs::playback_device(&devices) else {
+            last_playback_device = None;
+            last_states.clear();
+            continue;
+        };
+        if last_playback_device.as_deref() != Some(&device.id) {
+            last_states.clear();
+            last_playback_device = Some(device.id.clone());
+        }
 
-            // Phase 5: On first tick per device, sync initial transport settings.
-            if initialized.insert(device.id.clone()) {
-                if let Ok(settings) = device.av_transport.get_transport_settings().await {
-                    let (shuffle, repeat) = parse_upnp_play_mode(&settings.play_mode);
-                    // Apply to session if active, else to queue.
-                    let session_lock = sessions.get_or_create(&device.id);
-                    let has_session = session_lock.read().is_some();
-                    if has_session {
-                        let shuffle_mode: super::session::ShuffleMode =
-                            serde_json::from_value(serde_json::Value::String(shuffle.to_string()))
-                                .unwrap_or(super::session::ShuffleMode::Off);
-                        let repeat_mode: super::session::RepeatMode =
-                            serde_json::from_value(serde_json::Value::String(repeat.to_string()))
-                                .unwrap_or(super::session::RepeatMode::Off);
-                        let mut guard = session_lock.write();
-                        if let Some(ref mut session) = *guard {
-                            session.set_shuffle(shuffle_mode);
-                            session.set_repeat(repeat_mode);
-                        }
-                    } else {
-                        let queue = queues.get_or_create(&device.id);
-                        let mut q = queue.write();
-                        q.set_shuffle_mode(shuffle.to_string());
-                        q.set_repeat_mode(repeat.to_string());
+        if initialized.insert(device.id.clone()) {
+            if let Ok(settings) = device.av_transport.get_transport_settings().await {
+                let (shuffle, repeat) = parse_upnp_play_mode(&settings.play_mode);
+                let session_lock = sessions.get_or_create(PLAYBACK_TARGET_ID);
+                let has_session = session_lock.read().is_some();
+                if has_session {
+                    let shuffle_mode: super::session::ShuffleMode =
+                        serde_json::from_value(serde_json::Value::String(shuffle.to_string()))
+                            .unwrap_or(super::session::ShuffleMode::Off);
+                    let repeat_mode: super::session::RepeatMode =
+                        serde_json::from_value(serde_json::Value::String(repeat.to_string()))
+                            .unwrap_or(super::session::RepeatMode::Off);
+                    let mut guard = session_lock.write();
+                    if let Some(ref mut session) = *guard {
+                        session.set_shuffle(shuffle_mode);
+                        session.set_repeat(repeat_mode);
                     }
-                    debug!(
-                        "Synced initial transport settings for {}: {}",
-                        device.id, settings.play_mode
-                    );
+                } else {
+                    let queue = queues.get_or_create(PLAYBACK_TARGET_ID);
+                    let mut queue = queue.write();
+                    queue.set_shuffle_mode(shuffle.to_string());
+                    queue.set_repeat_mode(repeat.to_string());
                 }
+                debug!(
+                    "Synced global transport settings from {}: {}",
+                    device.id, settings.play_mode
+                );
             }
+        }
 
-            // Query device state once per tick.
-            let transport = device.av_transport.get_transport_info().await.ok();
-            let position = device.av_transport.get_position_info().await.ok();
+        let transport = device.av_transport.get_transport_info().await.ok();
+        let position = device.av_transport.get_position_info().await.ok();
 
-            let transport_state = transport
-                .as_ref()
-                .map(|t| t.current_transport_state.clone())
-                .unwrap_or_default();
-            let playing = transport_state == "PLAYING";
-            let elapsed = position
-                .as_ref()
-                .map(|p| parse_duration(&p.rel_time))
-                .unwrap_or(0.0);
-            let duration = position
-                .as_ref()
-                .map(|p| parse_duration(&p.track_duration))
-                .unwrap_or(0.0);
+        let transport_state = transport
+            .as_ref()
+            .map(|transport| transport.current_transport_state.clone())
+            .unwrap_or_default();
+        let playing = transport_state == "PLAYING";
+        let elapsed = position
+            .as_ref()
+            .map(|position| parse_duration(&position.rel_time))
+            .unwrap_or(0.0);
+        let duration = position
+            .as_ref()
+            .map(|position| parse_duration(&position.track_duration))
+            .unwrap_or(0.0);
 
-            let session_lock = sessions.get_or_create(&device.id);
-            let has_session = session_lock.read().is_some();
+        let session_lock = sessions.get_or_create(PLAYBACK_TARGET_ID);
+        let has_session = session_lock.read().is_some();
 
-            let track_uri = position
-                .as_ref()
-                .map(|p| p.track_uri.clone())
-                .unwrap_or_default();
+        let track_uri = position
+            .as_ref()
+            .map(|position| position.track_uri.clone())
+            .unwrap_or_default();
 
-            if has_session {
-                handle_session_device(
-                    &device,
-                    &session_lock,
-                    &library,
-                    &base_url,
-                    &events,
-                    &mut last_states,
-                    &transport_state,
-                    &track_uri,
-                    playing,
-                    elapsed,
-                    duration,
-                )
-                .await;
-            } else {
-                handle_queue_device(
-                    &device,
-                    &queues,
-                    &base_url,
-                    &events,
-                    &mut last_states,
-                    &transport_state,
-                )
-                .await;
-            }
-
-            // Phase 4: Fetch allowed transport actions for SSE broadcast.
-            let allowed_actions = device
-                .av_transport
-                .get_current_transport_actions()
-                .await
-                .ok();
-
-            // Broadcast full playback state over SSE.
-            broadcast_playback_state(
+        if has_session {
+            handle_session_device(
                 &device,
                 &session_lock,
-                &queues,
                 &library,
                 &base_url,
                 &events,
+                &mut last_states,
+                &transport_state,
+                &track_uri,
                 playing,
                 elapsed,
                 duration,
-                allowed_actions.as_ref(),
-            );
+            )
+            .await;
+        } else {
+            handle_queue_device(
+                &device,
+                &queues,
+                &base_url,
+                &events,
+                &mut last_states,
+                &transport_state,
+            )
+            .await;
         }
+
+        let allowed_actions = device
+            .av_transport
+            .get_current_transport_actions()
+            .await
+            .ok();
+
+        broadcast_playback_state(
+            &session_lock,
+            &queues,
+            &library,
+            &base_url,
+            &events,
+            playing,
+            elapsed,
+            duration,
+            allowed_actions.as_ref(),
+        );
     }
 }
 
@@ -240,7 +237,7 @@ async fn handle_session_device(
                 events.publish(
                     "track_changed",
                     &serde_json::json!({
-                        "device_id": device.id,
+                        "target_id": PLAYBACK_TARGET_ID,
                         "track": { "id": track_id, "title": title, "artist": artist }
                     }),
                 );
@@ -331,14 +328,14 @@ async fn handle_session_device(
             events.publish(
                 "track_changed",
                 &serde_json::json!({
-                    "device_id": device.id,
+                    "target_id": PLAYBACK_TARGET_ID,
                     "track": { "id": track_id, "title": title, "artist": artist }
                 }),
             );
         } else {
             events.publish(
                 "session_ended",
-                &serde_json::json!({ "device_id": device.id }),
+                &serde_json::json!({ "target_id": PLAYBACK_TARGET_ID }),
             );
         }
     }
@@ -354,7 +351,7 @@ async fn handle_queue_device(
     last_states: &mut HashMap<String, String>,
     transport_state: &str,
 ) {
-    let queue_lock = queues.get_or_create(&device.id);
+    let queue_lock = queues.get_or_create(PLAYBACK_TARGET_ID);
 
     // Skip devices with empty queues.
     {
@@ -395,7 +392,7 @@ async fn handle_queue_device(
             events.publish(
                 "track_changed",
                 &serde_json::json!({
-                    "device_id": device.id,
+                        "target_id": PLAYBACK_TARGET_ID,
                     "track": {
                         "id": track.id,
                         "title": track.title,
@@ -406,7 +403,7 @@ async fn handle_queue_device(
         } else {
             events.publish(
                 "queue_ended",
-                &serde_json::json!({ "device_id": device.id }),
+                &serde_json::json!({ "target_id": PLAYBACK_TARGET_ID }),
             );
         }
     }
@@ -416,7 +413,6 @@ async fn handle_queue_device(
 
 #[allow(clippy::too_many_arguments)]
 fn broadcast_playback_state(
-    device: &crate::wiim::device::WiimDevice,
     session_lock: &parking_lot::RwLock<Option<super::session::PlaySession>>,
     queues: &QueueManager,
     library: &SharedLibrary,
@@ -471,7 +467,7 @@ fn broadcast_playback_state(
                 Some(info),
             )
         } else {
-            let queue = queues.get_or_create(&device.id);
+            let queue = queues.get_or_create(PLAYBACK_TARGET_ID);
             let q = queue.read();
             (
                 q.current().cloned(),
@@ -487,7 +483,7 @@ fn broadcast_playback_state(
     events.publish(
         "playback_state",
         &serde_json::json!({
-            "target_id": device.id,
+            "target_id": PLAYBACK_TARGET_ID,
             "playing": playing,
             "current_track": current_track,
             "position": pos,

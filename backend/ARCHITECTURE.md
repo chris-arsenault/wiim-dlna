@@ -143,7 +143,7 @@ The library is rebuilt from scratch on each scan (no incremental updates). This 
 main thread
 ├── axum HTTP server (tokio, multi-threaded)
 ├── tokio::spawn → collector registration renewal
-├── tokio::spawn → collector inventory + group refresh
+├── tokio::spawn → collector inventory + output reconciliation
 ├── tokio::spawn → playback monitor
 └── tokio::spawn → library::scan_loop()  (periodic rescan)
 ```
@@ -194,12 +194,12 @@ src/
 ├── control/
 │   ├── mod.rs                      Control plane routes + state
 │   ├── state.rs                    Shared state (DeviceManager, EventBus, sessions)
-│   ├── groups.rs                   Multiroom group create/dissolve (HTTPS API primary, SOAP fallback)
+│   ├── outputs.rs                  WiiM output membership + physical group reconciliation
 │   ├── eq.rs                       EQ, balance, crossfade, source switching, WiFi status
-│   ├── playback_monitor.rs         Periodic polling of device transport state
-│   ├── session.rs                  Session-based playback engine (shuffle/repeat/gapless)
+│   ├── playback_monitor.rs         Polling of the singleton playback transport
+│   ├── session.rs                  Singleton playback engine (shuffle/repeat/gapless)
 │   ├── events.rs                   SSE event bus for real-time frontend push
-│   ├── device_config.rs            SQLite persistence for device preferences
+│   ├── device_config.rs            SQLite persistence for output + application preferences
 │   └── models.rs                   Request/response types
 │
 ├── wiim/
@@ -219,6 +219,12 @@ their responses; the collector resolves the device ID to its on-link endpoints
 and forwards bytes. See [docs/WIIM-PROTOCOL.md](docs/WIIM-PROTOCOL.md) for the
 protocol reference including multiroom grouping, EQ, source switching, and
 known idiosyncrasies.
+
+The control API exposes one logical playback target, `playing`, with one queue,
+session, timer, and library-navigation state. Only WiiMs enter the device
+registry. Airwave persists each WiiM's desired on/off output membership,
+reconciles every enabled WiiM into one physical group, and detaches and stops
+disabled WiiMs without changing their power, mute, or volume settings.
 
 ## Protocol References
 

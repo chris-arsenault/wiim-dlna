@@ -1,9 +1,9 @@
 import { useCallback, useState } from "react";
 import { api } from "../../api/client";
 import { usePlayerStore } from "../../stores/playerStore";
-import { useDeviceStore } from "../../stores/deviceStore";
+import { selectPlaybackDevice, useDeviceStore } from "../../stores/deviceStore";
 import { useArtColor } from "../../hooks/useArtColor";
-import { DevicePill } from "../layout/DevicePill";
+import { OutputStatus } from "../layout/OutputStatus";
 import { DebugOverlay } from "./NowPlayingDebug";
 import { PlayerVolume } from "./PlayerVolume";
 import { StarRating } from "./StarRating";
@@ -70,29 +70,26 @@ function NowPlayingHeader() {
   const session = usePlayerStore((s) => s.session);
   const sleepRemaining = usePlayerStore((s) => s.sleepRemaining);
   const setSleepRemaining = usePlayerStore((s) => s.setSleepRemaining);
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
   const [sleepTimerOpen, setSleepTimerOpen] = useState(false);
 
   const handleSetSleepTimer = useCallback(
     async (minutes: number) => {
-      if (!activeDeviceId) return;
-      await api.setSleepTimer(activeDeviceId, minutes);
+      await api.setSleepTimer(minutes);
       setSleepRemaining(minutes * 60);
       setSleepTimerOpen(false);
     },
-    [activeDeviceId, setSleepRemaining]
+    [setSleepRemaining]
   );
 
   const handleCancelSleepTimer = useCallback(async () => {
-    if (!activeDeviceId) return;
-    await api.cancelSleepTimer(activeDeviceId);
+    await api.cancelSleepTimer();
     setSleepRemaining(null);
     setSleepTimerOpen(false);
-  }, [activeDeviceId, setSleepRemaining]);
+  }, [setSleepRemaining]);
 
   return (
     <div className="flex items-center justify-between px-4 py-3 shrink-0">
-      <DevicePill />
+      <OutputStatus />
       <div className="text-center flex-1 min-w-0 px-2">
         {session && (
           <div className="text-[10px] text-white/40 truncate">
@@ -178,15 +175,14 @@ function TrackInfoSection() {
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const rating = usePlayerStore((s) => s.rating);
   const setRating = usePlayerStore((s) => s.setRating);
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
 
   const handleRate = useCallback(
     async (stars: number) => {
-      if (!activeDeviceId || !currentTrack) return;
+      if (!currentTrack) return;
       setRating(stars);
-      await api.rateTrack(activeDeviceId, currentTrack.id, stars);
+      await api.rateTrack(currentTrack.id, stars);
     },
-    [activeDeviceId, currentTrack, setRating]
+    [currentTrack, setRating]
   );
 
   return (
@@ -206,8 +202,7 @@ function TrackInfoSection() {
 
 function SeekBarSection() {
   const { elapsedSeconds, durationSeconds, allowedActions } = usePlayerStore();
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
-  const activeDevice = useDeviceStore((s) => s.devices.find((d) => d.id === s.activeDeviceId));
+  const activeDevice = useDeviceStore((state) => selectPlaybackDevice(state.devices));
 
   useSleepTimerSync();
 
@@ -217,21 +212,21 @@ function SeekBarSection() {
 
   const handleSeek = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
-      if (!activeDeviceId) return;
-      await api.seek(activeDeviceId, parseFloat(e.target.value));
+      if (!activeDevice) return;
+      await api.seek(parseFloat(e.target.value));
     },
-    [activeDeviceId]
+    [activeDevice]
   );
 
   const handleSeekForward = useCallback(async () => {
-    if (!activeDeviceId) return;
-    await api.seekForward(activeDeviceId);
-  }, [activeDeviceId]);
+    if (!activeDevice) return;
+    await api.seekForward();
+  }, [activeDevice]);
 
   const handleSeekBackward = useCallback(async () => {
-    if (!activeDeviceId) return;
-    await api.seekBackward(activeDeviceId);
-  }, [activeDeviceId]);
+    if (!activeDevice) return;
+    await api.seekBackward();
+  }, [activeDevice]);
 
   return (
     <div className="px-6 py-2 shrink-0">
@@ -274,48 +269,46 @@ function SeekBarSection() {
 function useTransportActions() {
   const { playing, shuffleMode, repeatMode, session } = usePlayerStore();
   const { setPlaying, setShuffleMode, setRepeatMode } = usePlayerStore();
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
+  const hasOutput = useDeviceStore((state) => selectPlaybackDevice(state.devices) != null);
 
   const handlePlayPause = useCallback(async () => {
-    if (!activeDeviceId) return;
+    if (!hasOutput) return;
     if (playing) {
-      await api.pause(activeDeviceId);
+      await api.pause();
       setPlaying(false);
     } else {
-      await api.resume(activeDeviceId);
+      await api.resume();
       setPlaying(true);
     }
-  }, [activeDeviceId, playing, setPlaying]);
+  }, [hasOutput, playing, setPlaying]);
 
   const handleNext = useCallback(async () => {
-    if (!activeDeviceId) return;
-    if (session) await api.sessionNext(activeDeviceId);
-    else await api.next(activeDeviceId);
-  }, [activeDeviceId, session]);
+    if (!hasOutput) return;
+    if (session) await api.sessionNext();
+    else await api.next();
+  }, [hasOutput, session]);
 
   const handlePrev = useCallback(async () => {
-    if (!activeDeviceId) return;
-    if (session) await api.sessionPrev(activeDeviceId);
-    else await api.prev(activeDeviceId);
-  }, [activeDeviceId, session]);
+    if (!hasOutput) return;
+    if (session) await api.sessionPrev();
+    else await api.prev();
+  }, [hasOutput, session]);
 
   const cycleShuffle = useCallback(async () => {
-    if (!activeDeviceId) return;
     const idx = SHUFFLE_MODES.indexOf(shuffleMode as (typeof SHUFFLE_MODES)[number]);
     const next = SHUFFLE_MODES[(idx + 1) % SHUFFLE_MODES.length];
-    if (session) await api.sessionSetShuffle(activeDeviceId, next);
-    else await api.setShuffle(activeDeviceId, next);
+    if (session) await api.sessionSetShuffle(next);
+    else await api.setShuffle(next);
     setShuffleMode(next);
-  }, [activeDeviceId, shuffleMode, setShuffleMode, session]);
+  }, [shuffleMode, setShuffleMode, session]);
 
   const cycleRepeat = useCallback(async () => {
-    if (!activeDeviceId) return;
     const idx = REPEAT_MODES.indexOf(repeatMode as (typeof REPEAT_MODES)[number]);
     const next = REPEAT_MODES[(idx + 1) % REPEAT_MODES.length];
-    if (session) await api.sessionSetRepeat(activeDeviceId, next);
-    else await api.setRepeat(activeDeviceId, next);
+    if (session) await api.sessionSetRepeat(next);
+    else await api.setRepeat(next);
     setRepeatMode(next);
-  }, [activeDeviceId, repeatMode, setRepeatMode, session]);
+  }, [repeatMode, setRepeatMode, session]);
 
   return { handlePlayPause, handleNext, handlePrev, cycleShuffle, cycleRepeat };
 }

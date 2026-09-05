@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { usePlayerStore } from "../../stores/playerStore";
-import { useDeviceStore } from "../../stores/deviceStore";
+import { selectPlaybackDevice, useDeviceStore } from "../../stores/deviceStore";
 import { api } from "../../api/client";
 
 interface Props {
@@ -11,7 +11,7 @@ export function MiniPlayer({ onExpand }: Props) {
   const { playing, currentTrack, elapsedSeconds, durationSeconds, allowedActions } =
     usePlayerStore();
   const session = usePlayerStore((s) => s.session);
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
+  const hasOutput = useDeviceStore((state) => selectPlaybackDevice(state.devices) != null);
 
   const progress = durationSeconds > 0 ? (elapsedSeconds / durationSeconds) * 100 : 0;
   const hasTrack = !!currentTrack;
@@ -19,21 +19,21 @@ export function MiniPlayer({ onExpand }: Props) {
   const handlePlayPause = useCallback(
     async (e: React.MouseEvent) => {
       e.stopPropagation();
-      if (!activeDeviceId) return;
-      if (playing) await api.pause(activeDeviceId);
-      else await api.resume(activeDeviceId);
+      if (!hasOutput) return;
+      if (playing) await api.pause();
+      else await api.resume();
     },
-    [activeDeviceId, playing]
+    [hasOutput, playing]
   );
 
   const handleNext = useCallback(
     async (e: React.MouseEvent) => {
       e.stopPropagation();
-      if (!activeDeviceId) return;
-      if (session) await api.sessionNext(activeDeviceId);
-      else await api.next(activeDeviceId);
+      if (!hasOutput) return;
+      if (session) await api.sessionNext();
+      else await api.next();
     },
-    [activeDeviceId, session]
+    [hasOutput, session]
   );
 
   return (

@@ -7,8 +7,7 @@ object AirwavePrefs {
     private const val KEY_SERVER_URL = "server_url"
     private const val KEY_API_TOKEN = "api_token"
     private const val KEY_AUTH_REQUIRED = "auth_required"
-    private const val KEY_DEVICE_ID = "device_id"
-    private const val KEY_DEVICE_NAME = "device_name"
+    private const val KEY_OUTPUT_NAMES = "output_names"
     private const val KEY_PLAYING = "playing"
     private const val KEY_NOW_TITLE = "now_title"
     private const val KEY_NOW_SUBTITLE = "now_subtitle"
@@ -38,19 +37,14 @@ object AirwavePrefs {
             .apply()
     }
 
-    fun deviceId(context: Context): String? =
+    fun outputNames(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_DEVICE_ID, null)
+            .getString(KEY_OUTPUT_NAMES, "") ?: ""
 
-    fun deviceName(context: Context): String? =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_DEVICE_NAME, null)
-
-    fun setDevice(context: Context, id: String?, name: String?) {
+    fun setOutputNames(context: Context, names: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_DEVICE_ID, id)
-            .putString(KEY_DEVICE_NAME, name)
+            .putString(KEY_OUTPUT_NAMES, names)
             .apply()
     }
 

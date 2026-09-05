@@ -2,7 +2,7 @@ Airwave Control is a small native Android home-screen widget for an Airwave serv
 
 It does not include library browsing. It only provides player controls:
 
-* tap the selected device to cycle devices
+* show the speakers enabled for the shared playing group
 * volume down / volume up
 * play / pause
 * next track

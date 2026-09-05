@@ -431,7 +431,7 @@ pub fn collect_track_ids(library: &Library, container_id: &str) -> Vec<String> {
     ids
 }
 
-/// Manages play sessions per device.
+/// Manages play sessions by logical playback target.
 pub struct SessionManager {
     sessions: DashMap<String, Arc<RwLock<Option<PlaySession>>>>,
 }

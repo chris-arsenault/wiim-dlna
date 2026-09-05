@@ -224,12 +224,6 @@ pub struct RateTrackRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateGroupRequest {
-    pub master_id: String,
-    pub slave_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PresetRequest {
     pub preset: String,
 }

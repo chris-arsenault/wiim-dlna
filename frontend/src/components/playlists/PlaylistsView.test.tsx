@@ -3,6 +3,29 @@ import { screen, waitFor, fireEvent } from "@testing-library/react";
 import { renderWithProviders } from "../../test-utils";
 import { PlaylistsView } from "./PlaylistsView";
 import { useDeviceStore } from "../../stores/deviceStore";
+import type { Device } from "../../api/client";
+
+const TEST_DEVICE: Device = {
+  id: "dev-1",
+  name: "Living Room",
+  ip: "192.0.2.10",
+  model: "WiiM Mini",
+  firmware: null,
+  device_type: "wiim",
+  enabled: true,
+  capabilities: {
+    av_transport: true,
+    rendering_control: true,
+    wiim_extended: true,
+    https_api: true,
+  },
+  volume: 0.5,
+  muted: false,
+  channel: null,
+  source: null,
+  group_id: null,
+  is_master: false,
+};
 
 const {
   mockGetPlaylists,
@@ -53,7 +76,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGetPlaylists.mockResolvedValue([PLAYLIST]);
   mockGetPlaylist.mockResolvedValue(DETAIL);
-  useDeviceStore.setState({ devices: [], activeDeviceId: "dev-1" });
+  useDeviceStore.setState({ devices: [TEST_DEVICE], settingsDeviceId: "dev-1" });
 });
 
 describe("PlaylistsView list", () => {
@@ -76,7 +99,7 @@ describe("PlaylistsView list", () => {
     renderWithProviders(<PlaylistsView />);
     fireEvent.click(await screen.findByTitle("Play playlist"));
     await waitFor(() =>
-      expect(mockSessionPlay).toHaveBeenCalledWith("dev-1", {
+      expect(mockSessionPlay).toHaveBeenCalledWith({
         source_id: "pl1",
         start_track_id: undefined,
         shuffle: undefined,
@@ -88,7 +111,7 @@ describe("PlaylistsView list", () => {
     renderWithProviders(<PlaylistsView />);
     fireEvent.click(await screen.findByTitle("Shuffle playlist"));
     await waitFor(() =>
-      expect(mockSessionPlay).toHaveBeenCalledWith("dev-1", {
+      expect(mockSessionPlay).toHaveBeenCalledWith({
         source_id: "pl1",
         start_track_id: undefined,
         shuffle: "tracks",
@@ -116,7 +139,7 @@ describe("PlaylistsView detail", () => {
     fireEvent.click(await screen.findByText("Road Trip"));
     fireEvent.click(await screen.findByText("Track Two"));
     await waitFor(() =>
-      expect(mockSessionPlay).toHaveBeenCalledWith("dev-1", {
+      expect(mockSessionPlay).toHaveBeenCalledWith({
         source_id: "pl1",
         start_track_id: "t2",
         shuffle: undefined,

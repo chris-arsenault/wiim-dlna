@@ -9,7 +9,7 @@ Airwave — a monorepo for a WiiM audio ecosystem: a unified Rust server (DLNA m
 | Directory | Language | Purpose |
 |-----------|----------|---------|
 | `backend/` | Rust | Unified DLNA/UPnP MediaServer + control plane — SSDP, SOAP, HTTP streaming, device management, playback, queue/session engine, playlists, EQ, metadata editing, SSE |
-| `frontend/` | React/TypeScript (Vite, pnpm) | Mobile-first web UI — library browser, now playing, queue, playlists, device/group management, metadata editing |
+| `frontend/` | React/TypeScript (Vite, pnpm) | Mobile-first web UI — library browser, now playing, queue, playlists, WiiM output selection, metadata editing |
 
 ## Build & Run
 
@@ -68,7 +68,8 @@ make ci
   - **HTTPS API** (port 443, self-signed certs): EQ, source switching, multiroom grouping, device status — Linkplay proprietary `httpapi.asp?command=...`
 - SSDP discovery for WiiM MediaRenderer devices on the local network
 - Server-side queue engine with Poweramp-style shuffle/repeat modes
-- Session-based playback with group/track shuffle, gapless pre-fetch, auto-advance
+- One server-wide playback session with group/track shuffle, gapless pre-fetch, auto-advance
+- Enabled WiiMs are reconciled into one playing group; disabled WiiMs are detached and stopped
 - SSE for real-time playback state + device change push to frontend
 - SQLite for playlists and preferences; playlist writes accept container IDs and expand them to tracks
 - Metadata tag editing via lofty (ID3/Vorbis), with bulk operations and library rescan
@@ -84,8 +85,8 @@ make ci
 ## Key Constraints
 
 - Server needs host networking for SSDP multicast device discovery
-- Multiroom grouping uses HTTPS API, NOT SOAP (see `backend/docs/WIIM-PROTOCOL.md`)
-- Device state is canonical — always read from device, never persist-and-restore group state
+- Output membership is a persisted Airwave preference; physical multiroom state is read from the devices and reconciled to it
+- Physical multiroom grouping uses HTTPS API, NOT SOAP (see `backend/docs/WIIM-PROTOCOL.md`)
 - Music volume mounted read-write when metadata editing is enabled
 - Public UI/API access is protected by the shared ALB Cognito rule. Keep DLNA,
   SOAP, and media streaming compatible with LAN devices; do not put Cognito in

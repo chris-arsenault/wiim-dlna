@@ -1,14 +1,13 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
 use super::collector::{CollectorClient, CollectorDevice};
 use super::device::{DeviceCapabilities, DeviceManager, DeviceParams, ServiceUrls, WiimDevice};
-use crate::control::device_config::DeviceConfigStore;
 use crate::control::events::EventBus;
+use crate::control::state::ControlState;
 
 fn proxy_service_urls(device: &CollectorDevice) -> ServiceUrls {
     let prefix = format!("/wiim/{}/upnp", device.id);
@@ -76,7 +75,7 @@ async fn register_device(
     persisted: &std::collections::HashMap<String, crate::control::device_config::DeviceConfig>,
     events: &EventBus,
 ) -> Option<String> {
-    if !record.reachable {
+    if !record.reachable || !is_wiim_record(&record) {
         return None;
     }
     let id = record.id.clone();
@@ -202,38 +201,31 @@ async fn register_device(
 
 /// Poll the collector's native WiiM inventory and retain Airwave's device,
 /// capability, group, and playback models on top of its scoped transport.
-pub async fn run_discovery(
-    device_manager: Arc<DeviceManager>,
-    device_config: Arc<DeviceConfigStore>,
-    events: EventBus,
-    collector: CollectorClient,
-    collector_ready: Arc<AtomicBool>,
-    interval: Duration,
-) {
-    let persisted = device_config.load_all();
+pub async fn run_discovery(state: ControlState, collector: CollectorClient, interval: Duration) {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let mut known_ids = HashSet::new();
 
     loop {
+        let persisted = state.device_config.load_all();
         let records = match collector.devices().await {
             Ok(records) => records,
             Err(error) => {
-                collector_ready.store(false, Ordering::Relaxed);
+                state.collector_ready.store(false, Ordering::Relaxed);
                 warn!("Failed to read WiiM inventory from collector: {error}");
                 tokio::time::sleep(interval).await;
                 continue;
             }
         };
-        collector_ready.store(true, Ordering::Relaxed);
+        state.collector_ready.store(true, Ordering::Relaxed);
         let mut current_ids = HashSet::new();
         for record in records {
             if let Some(id) = register_device(
                 record,
                 None,
                 &collector,
-                &device_manager,
+                &state.devices,
                 &persisted,
-                &events,
+                &state.events,
             )
             .await
             {
@@ -243,7 +235,8 @@ pub async fn run_discovery(
 
         // Grouped slaves may stop advertising. The master still reports their
         // addresses; ask the collector to validate and add each missing one.
-        for master in device_manager
+        for master in state
+            .devices
             .list_all()
             .iter()
             .filter(|device| device.is_master)
@@ -264,7 +257,8 @@ pub async fn run_discovery(
                 let Some(slave_ip) = slave.get("ip").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
-                if device_manager
+                if state
+                    .devices
                     .find_id_by_ip(slave_ip)
                     .is_some_and(|id| current_ids.contains(&id))
                 {
@@ -276,9 +270,9 @@ pub async fn run_discovery(
                             record,
                             Some(master.id.clone()),
                             &collector,
-                            &device_manager,
+                            &state.devices,
                             &persisted,
-                            &events,
+                            &state.events,
                         )
                         .await
                         {
@@ -294,12 +288,21 @@ pub async fn run_discovery(
 
         for id in known_ids.difference(&current_ids) {
             info!("Device no longer reachable through collector: {id}");
-            device_manager.remove(id);
-            events.publish("device_removed", &serde_json::json!({ "id": id }));
+            state.devices.remove(id);
+            state
+                .events
+                .publish("device_removed", &serde_json::json!({ "id": id }));
         }
         known_ids = current_ids;
+        if let Err(status) = crate::control::outputs::reconcile_outputs(&state).await {
+            warn!("Failed to reconcile playing outputs: HTTP {status}");
+        }
         tokio::time::sleep(interval).await;
     }
+}
+
+fn is_wiim_record(record: &CollectorDevice) -> bool {
+    record.services.play_queue.is_some()
 }
 
 async fn refresh_group_state(device_id: &str, device_manager: &DeviceManager, events: &EventBus) {
@@ -411,5 +414,27 @@ mod tests {
         assert_eq!(derive_group_role(r#"{"slaves":2}"#, &status), (false, true));
         let grouped = std::collections::HashMap::from([("group".into(), "1".into())]);
         assert_eq!(derive_group_role("{}", &grouped), (true, false));
+    }
+
+    #[test]
+    fn inventory_without_wiim_play_queue_is_filtered() {
+        let mut device = CollectorDevice {
+            id: "living-room-tv".into(),
+            udn: "uuid:living-room-tv".into(),
+            ip: "192.0.2.10".into(),
+            name: "TV".into(),
+            model: None,
+            firmware: None,
+            description_port: 1400,
+            services: CollectorServices {
+                av_transport: Some("/MediaRenderer/AVTransport/Control".into()),
+                rendering_control: Some("/MediaRenderer/RenderingControl/Control".into()),
+                play_queue: None,
+            },
+            reachable: true,
+        };
+        assert!(!is_wiim_record(&device));
+        device.services.play_queue = Some("/upnp/control/PlayQueue1".into());
+        assert!(is_wiim_record(&device));
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use parking_lot::Mutex;
@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::models::{SleepTimerRequest, SleepTimerResponse};
-use super::state::ControlState;
+use super::state::{ControlState, PLAYBACK_TARGET_ID};
 
 #[derive(Clone)]
 pub struct SleepTimerManager {
@@ -34,42 +34,39 @@ impl SleepTimerManager {
         }
     }
 
-    pub fn set(&self, device_id: String, minutes: u32, state: ControlState) {
+    pub fn set(&self, minutes: u32, state: ControlState) {
         let duration = std::time::Duration::from_secs(minutes as u64 * 60);
         let expires_at = Instant::now() + duration;
+        self.cancel();
 
-        // Cancel existing timer for this device
-        self.cancel(&device_id);
-
-        let mgr = self.clone();
-        let did = device_id.clone();
+        let manager = self.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(duration).await;
-            // Timer expired — stop playback
-            if let Some(device) = state.devices.get(&did) {
+            if let Some(device) = super::outputs::playback_device(&state.devices) {
                 let _ = device.av_transport.stop().await;
             }
             state.events.publish(
                 "sleep_timer_expired",
-                &serde_json::json!({ "device_id": did }),
+                &serde_json::json!({ "target_id": PLAYBACK_TARGET_ID }),
             );
-            mgr.inner.lock().remove(&did);
+            manager.inner.lock().remove(PLAYBACK_TARGET_ID);
         });
 
-        self.inner
-            .lock()
-            .insert(device_id, TimerEntry { expires_at, handle });
+        self.inner.lock().insert(
+            PLAYBACK_TARGET_ID.to_string(),
+            TimerEntry { expires_at, handle },
+        );
     }
 
-    pub fn cancel(&self, device_id: &str) {
-        if let Some(entry) = self.inner.lock().remove(device_id) {
+    pub fn cancel(&self) {
+        if let Some(entry) = self.inner.lock().remove(PLAYBACK_TARGET_ID) {
             entry.handle.abort();
         }
     }
 
-    pub fn remaining_seconds(&self, device_id: &str) -> Option<u64> {
+    pub fn remaining_seconds(&self) -> Option<u64> {
         let lock = self.inner.lock();
-        lock.get(device_id).map(|entry| {
+        lock.get(PLAYBACK_TARGET_ID).map(|entry| {
             let now = Instant::now();
             if entry.expires_at > now {
                 (entry.expires_at - now).as_secs()
@@ -82,46 +79,34 @@ impl SleepTimerManager {
 
 pub async fn set_sleep_timer(
     State(state): State<ControlState>,
-    Path(id): Path<String>,
     Json(body): Json<SleepTimerRequest>,
-) -> Result<StatusCode, StatusCode> {
-    if !state.devices.contains(&id) {
-        return Err(StatusCode::NOT_FOUND);
-    }
+) -> StatusCode {
     let remaining = body.minutes as u64 * 60;
-    state
-        .sleep_timers
-        .set(id.clone(), body.minutes, state.clone());
+    state.sleep_timers.set(body.minutes, state.clone());
     state.events.publish(
         "sleep_timer_changed",
-        &serde_json::json!({ "device_id": id, "remaining_seconds": remaining }),
+        &serde_json::json!({
+            "target_id": PLAYBACK_TARGET_ID,
+            "remaining_seconds": remaining,
+        }),
     );
-    Ok(StatusCode::OK)
+    StatusCode::OK
 }
 
-pub async fn get_sleep_timer(
-    State(state): State<ControlState>,
-    Path(id): Path<String>,
-) -> Result<Json<SleepTimerResponse>, StatusCode> {
-    if !state.devices.contains(&id) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    Ok(Json(SleepTimerResponse {
-        remaining_seconds: state.sleep_timers.remaining_seconds(&id),
-    }))
+pub async fn get_sleep_timer(State(state): State<ControlState>) -> Json<SleepTimerResponse> {
+    Json(SleepTimerResponse {
+        remaining_seconds: state.sleep_timers.remaining_seconds(),
+    })
 }
 
-pub async fn cancel_sleep_timer(
-    State(state): State<ControlState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    if !state.devices.contains(&id) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    state.sleep_timers.cancel(&id);
+pub async fn cancel_sleep_timer(State(state): State<ControlState>) -> StatusCode {
+    state.sleep_timers.cancel();
     state.events.publish(
         "sleep_timer_changed",
-        &serde_json::json!({ "device_id": id, "remaining_seconds": null }),
+        &serde_json::json!({
+            "target_id": PLAYBACK_TARGET_ID,
+            "remaining_seconds": null,
+        }),
     );
-    Ok(StatusCode::OK)
+    StatusCode::OK
 }

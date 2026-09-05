@@ -133,6 +133,7 @@ async fn main() {
         sessions: session_manager.clone(),
         art_cache,
         sleep_timers: sleep_timer_manager,
+        output_lock: Arc::new(tokio::sync::Mutex::new(())),
         base_url: cfg.base_url(),
         collector_ready: Arc::clone(&collector_ready),
     };
@@ -147,19 +148,22 @@ async fn main() {
         .route("/devices", get(control::devices::list_devices))
         .route("/devices/{id}", get(control::devices::get_device))
         .route(
-            "/devices/{id}/library-state",
+            "/library/state",
             get(control::devices::get_library_state).post(control::devices::set_library_state),
         )
         .route("/devices/{id}/volume", post(control::devices::set_volume))
         .route("/devices/{id}/mute", post(control::devices::toggle_mute))
-        .route("/devices/{id}/enabled", post(control::devices::set_enabled))
+        .route(
+            "/devices/{id}/enabled",
+            post(control::outputs::set_output_enabled),
+        )
         .route("/devices/{id}/name", post(control::devices::rename_device))
         .route(
             "/devices/{id}/channel",
             get(control::devices::get_channel).post(control::devices::set_channel),
         )
         .route(
-            "/devices/{id}/sleep-timer",
+            "/playback/sleep-timer",
             get(control::timer::get_sleep_timer)
                 .post(control::timer::set_sleep_timer)
                 .delete(control::timer::cancel_sleep_timer),
@@ -172,65 +176,57 @@ async fn main() {
             "/devices/{id}/wifi",
             get(control::eq::get_wifi_status),
         )
-        // Playback (under /playback/{target} to match frontend)
-        .route("/playback/{id}", get(control::playback::get_state))
-        .route("/playback/{id}/play", post(control::playback::play))
-        .route("/playback/{id}/stop", post(control::playback::stop))
-        .route("/playback/{id}/pause", post(control::playback::pause))
-        .route("/playback/{id}/resume", post(control::playback::resume))
-        .route("/playback/{id}/next", post(control::playback::next_track))
-        .route("/playback/{id}/prev", post(control::playback::prev_track))
-        .route("/playback/{id}/seek", post(control::playback::seek))
-        .route(
-            "/playback/{id}/seek-forward",
-            post(control::playback::seek_forward),
-        )
-        .route(
-            "/playback/{id}/seek-backward",
-            post(control::playback::seek_backward),
-        )
-        .route("/playback/{id}/rate", post(control::playback::rate_track))
-        .route(
-            "/playback/{id}/shuffle",
-            post(control::playback::set_shuffle),
-        )
-        .route("/playback/{id}/repeat", post(control::playback::set_repeat))
+        // One global playback object; physical WiiM output selection is internal.
+        .route("/playback", get(control::playback::get_state))
+        .route("/playback/play", post(control::playback::play))
+        .route("/playback/stop", post(control::playback::stop))
+        .route("/playback/pause", post(control::playback::pause))
+        .route("/playback/resume", post(control::playback::resume))
+        .route("/playback/volume", post(control::playback::set_volume))
+        .route("/playback/next", post(control::playback::next_track))
+        .route("/playback/prev", post(control::playback::prev_track))
+        .route("/playback/seek", post(control::playback::seek))
+        .route("/playback/seek-forward", post(control::playback::seek_forward))
+        .route("/playback/seek-backward", post(control::playback::seek_backward))
+        .route("/playback/rate", post(control::playback::rate_track))
+        .route("/playback/shuffle", post(control::playback::set_shuffle))
+        .route("/playback/repeat", post(control::playback::set_repeat))
         // Session-based playback
         .route(
-            "/playback/{id}/session/play",
+            "/playback/session/play",
             post(control::playback::session_play),
         )
         .route(
-            "/playback/{id}/session/next",
+            "/playback/session/next",
             post(control::playback::session_next),
         )
         .route(
-            "/playback/{id}/session/prev",
+            "/playback/session/prev",
             post(control::playback::session_prev),
         )
         .route(
-            "/playback/{id}/session/shuffle",
+            "/playback/session/shuffle",
             post(control::playback::session_set_shuffle),
         )
         .route(
-            "/playback/{id}/session/repeat",
+            "/playback/session/repeat",
             post(control::playback::session_set_repeat),
         )
-        // Queue (under /playback/{target}/queue)
+        // Queue belongs to the global playback object.
         .route(
-            "/playback/{id}/queue",
+            "/playback/queue",
             get(control::playback::get_queue).delete(control::playback::clear_queue),
         )
         .route(
-            "/playback/{id}/queue/add",
+            "/playback/queue/add",
             post(control::playback::add_to_queue),
         )
         .route(
-            "/playback/{id}/queue/move",
+            "/playback/queue/move",
             post(control::playback::move_in_queue),
         )
         .route(
-            "/playback/{id}/queue/{index}",
+            "/playback/queue/{index}",
             delete(control::playback::remove_from_queue),
         )
         // EQ (HTTPS API-based)
@@ -270,16 +266,6 @@ async fn main() {
             "/playlists/{id}/tracks/{position}",
             delete(control::playlists::remove_playlist_track),
         )
-        // Groups
-        .route("/groups", post(control::groups::create_group))
-        .route("/groups/{id}", delete(control::groups::dissolve_group))
-        // Group presets
-        .route("/presets", get(control::presets::list_presets))
-        .route(
-            "/presets/{slot}",
-            post(control::presets::save_preset).delete(control::presets::delete_preset),
-        )
-        .route("/presets/{slot}/load", post(control::presets::load_preset))
         // Art
         .route("/art/{id}", get(control::art::get_art))
         // Library
@@ -298,7 +284,7 @@ async fn main() {
             "/library/bulk/rename-artist",
             post(control::metadata::bulk_rename_artist),
         )
-        .with_state(control_state)
+        .with_state(control_state.clone())
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -370,16 +356,10 @@ async fn main() {
     ));
 
     // Collector inventory supplies renderer reachability; Airwave retains
-    // capability probing, group state, and every playback semantic.
-    let disc_devices = device_manager.clone();
-    let disc_config = device_config_store.clone();
-    let disc_events = event_bus.clone();
+    // WiiM filtering, output reconciliation, and every playback semantic.
     tokio::spawn(wiim::discovery::run_discovery(
-        disc_devices,
-        disc_config,
-        disc_events,
+        control_state.clone(),
         collector,
-        collector_ready,
         Duration::from_secs(30),
     ));
 

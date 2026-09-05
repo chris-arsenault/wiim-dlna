@@ -37,9 +37,9 @@ export const api = {
     request("/devices/" + id + "/enabled", { method: "POST", body: JSON.stringify({ enabled }) }),
   renameDevice: (id: string, name: string) =>
     request("/devices/" + id + "/name", { method: "POST", body: JSON.stringify({ name }) }),
-  getLibraryState: (id: string) => request<LibraryState>(`/devices/${id}/library-state`),
-  setLibraryState: (id: string, path: BreadcrumbEntry[]) =>
-    request("/devices/" + id + "/library-state", {
+  getLibraryState: () => request<LibraryState>("/library/state"),
+  setLibraryState: (path: BreadcrumbEntry[]) =>
+    request("/library/state", {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
@@ -56,62 +56,59 @@ export const api = {
     ),
 
   // Playback
-  getPlaybackState: (targetId: string) => request<PlaybackState>(`/playback/${targetId}`),
-  play: (targetId: string, body: PlayRequest) =>
-    request(`/playback/${targetId}/play`, { method: "POST", body: JSON.stringify(body) }),
-  pause: (targetId: string) => request(`/playback/${targetId}/pause`, { method: "POST" }),
-  resume: (targetId: string) => request(`/playback/${targetId}/resume`, { method: "POST" }),
-  next: (targetId: string) => request(`/playback/${targetId}/next`, { method: "POST" }),
-  prev: (targetId: string) => request(`/playback/${targetId}/prev`, { method: "POST" }),
-  seek: (targetId: string, positionSeconds: number) =>
-    request(`/playback/${targetId}/seek`, {
+  getPlaybackState: () => request<PlaybackState>("/playback"),
+  play: (body: PlayRequest) =>
+    request("/playback/play", { method: "POST", body: JSON.stringify(body) }),
+  pause: () => request("/playback/pause", { method: "POST" }),
+  resume: () => request("/playback/resume", { method: "POST" }),
+  setPlaybackVolume: (volume: number) =>
+    request("/playback/volume", { method: "POST", body: JSON.stringify({ volume }) }),
+  next: () => request("/playback/next", { method: "POST" }),
+  prev: () => request("/playback/prev", { method: "POST" }),
+  seek: (positionSeconds: number) =>
+    request("/playback/seek", {
       method: "POST",
       body: JSON.stringify({ position_seconds: positionSeconds }),
     }),
-  seekForward: (targetId: string) =>
-    request(`/playback/${targetId}/seek-forward`, { method: "POST" }),
-  seekBackward: (targetId: string) =>
-    request(`/playback/${targetId}/seek-backward`, { method: "POST" }),
-  rateTrack: (targetId: string, trackId: string, rating: number) =>
-    request(`/playback/${targetId}/rate`, {
+  seekForward: () => request("/playback/seek-forward", { method: "POST" }),
+  seekBackward: () => request("/playback/seek-backward", { method: "POST" }),
+  rateTrack: (trackId: string, rating: number) =>
+    request("/playback/rate", {
       method: "POST",
       body: JSON.stringify({ track_id: trackId, rating }),
     }),
-  setShuffle: (targetId: string, mode: string) =>
-    request(`/playback/${targetId}/shuffle`, { method: "POST", body: JSON.stringify({ mode }) }),
-  setRepeat: (targetId: string, mode: string) =>
-    request(`/playback/${targetId}/repeat`, { method: "POST", body: JSON.stringify({ mode }) }),
+  setShuffle: (mode: string) =>
+    request("/playback/shuffle", { method: "POST", body: JSON.stringify({ mode }) }),
+  setRepeat: (mode: string) =>
+    request("/playback/repeat", { method: "POST", body: JSON.stringify({ mode }) }),
 
   // Session-based playback
-  sessionPlay: (targetId: string, body: SessionPlayRequest) =>
-    request(`/playback/${targetId}/session/play`, { method: "POST", body: JSON.stringify(body) }),
-  sessionNext: (targetId: string) =>
-    request(`/playback/${targetId}/session/next`, { method: "POST" }),
-  sessionPrev: (targetId: string) =>
-    request(`/playback/${targetId}/session/prev`, { method: "POST" }),
-  sessionSetShuffle: (targetId: string, mode: string) =>
-    request(`/playback/${targetId}/session/shuffle`, {
+  sessionPlay: (body: SessionPlayRequest) =>
+    request("/playback/session/play", { method: "POST", body: JSON.stringify(body) }),
+  sessionNext: () => request("/playback/session/next", { method: "POST" }),
+  sessionPrev: () => request("/playback/session/prev", { method: "POST" }),
+  sessionSetShuffle: (mode: string) =>
+    request("/playback/session/shuffle", {
       method: "POST",
       body: JSON.stringify({ mode }),
     }),
-  sessionSetRepeat: (targetId: string, mode: string) =>
-    request(`/playback/${targetId}/session/repeat`, {
+  sessionSetRepeat: (mode: string) =>
+    request("/playback/session/repeat", {
       method: "POST",
       body: JSON.stringify({ mode }),
     }),
 
   // Queue
-  getQueue: (targetId: string) => request<QueueState>(`/playback/${targetId}/queue`),
-  addToQueue: (targetId: string, trackIds: string[], position = "end") =>
-    request(`/playback/${targetId}/queue/add`, {
+  getQueue: () => request<QueueState>("/playback/queue"),
+  addToQueue: (trackIds: string[], position = "end") =>
+    request("/playback/queue/add", {
       method: "POST",
       body: JSON.stringify({ track_ids: trackIds, position }),
     }),
-  removeFromQueue: (targetId: string, index: number) =>
-    request(`/playback/${targetId}/queue/${index}`, { method: "DELETE" }),
-  clearQueue: (targetId: string) => request(`/playback/${targetId}/queue`, { method: "DELETE" }),
-  moveInQueue: (targetId: string, fromIndex: number, toIndex: number) =>
-    request(`/playback/${targetId}/queue/move`, {
+  removeFromQueue: (index: number) => request(`/playback/queue/${index}`, { method: "DELETE" }),
+  clearQueue: () => request("/playback/queue", { method: "DELETE" }),
+  moveInQueue: (fromIndex: number, toIndex: number) =>
+    request("/playback/queue/move", {
       method: "POST",
       body: JSON.stringify({ from_index: fromIndex, to_index: toIndex }),
     }),
@@ -135,20 +132,6 @@ export const api = {
     request(`/playlists/${id}/tracks/${position}`, { method: "DELETE" }),
   playlistSourceId: (id: number) => `pl${id}`,
 
-  // Groups
-  createGroup: (masterId: string, slaveIds: string[]) =>
-    request("/groups", {
-      method: "POST",
-      body: JSON.stringify({ master_id: masterId, slave_ids: slaveIds }),
-    }),
-  dissolveGroup: (masterId: string) => request(`/groups/${masterId}`, { method: "DELETE" }),
-
-  // Group presets
-  getPresets: () => request<{ presets: Record<string, GroupDefinition[] | null> }>("/presets"),
-  savePreset: (slot: number) => request("/presets/" + slot, { method: "POST" }),
-  loadPreset: (slot: number) => request("/presets/" + slot + "/load", { method: "POST" }),
-  deletePreset: (slot: number) => request("/presets/" + slot, { method: "DELETE" }),
-
   // Metadata editing
   updateTrack: (trackId: string, update: TagUpdate) =>
     request(`/library/tracks/${trackId}`, { method: "PATCH", body: JSON.stringify(update) }),
@@ -164,14 +147,13 @@ export const api = {
     }),
 
   // Sleep timer
-  setSleepTimer: (id: string, minutes: number) =>
-    request("/devices/" + id + "/sleep-timer", {
+  setSleepTimer: (minutes: number) =>
+    request("/playback/sleep-timer", {
       method: "POST",
       body: JSON.stringify({ minutes }),
     }),
-  getSleepTimer: (id: string) => request<SleepTimerState>(`/devices/${id}/sleep-timer`),
-  cancelSleepTimer: (id: string) =>
-    request("/devices/" + id + "/sleep-timer", { method: "DELETE" }),
+  getSleepTimer: () => request<SleepTimerState>("/playback/sleep-timer"),
+  cancelSleepTimer: () => request("/playback/sleep-timer", { method: "DELETE" }),
 
   // Device settings (HTTPS API)
   switchSource: (id: string, source: string) =>
@@ -388,9 +370,4 @@ export interface WifiStatus {
   source: string | null;
   rssi: number | null;
   ssid: string | null;
-}
-
-export interface GroupDefinition {
-  master_id: string;
-  slave_ids: string[];
 }

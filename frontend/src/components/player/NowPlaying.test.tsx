@@ -21,7 +21,7 @@ vi.mock("../../api/client", () => ({
     seek: vi.fn(() => Promise.resolve()),
     seekForward: vi.fn(() => Promise.resolve()),
     seekBackward: vi.fn(() => Promise.resolve()),
-    setVolume: mockSetVolume,
+    setPlaybackVolume: mockSetVolume,
     setShuffle: vi.fn(() => Promise.resolve()),
     setRepeat: vi.fn(() => Promise.resolve()),
     rateTrack: vi.fn(() => Promise.resolve()),
@@ -81,7 +81,7 @@ describe("NowPlaying", () => {
     });
     useDeviceStore.setState({
       devices: [makeDevice()],
-      activeDeviceId: "dev-1",
+      settingsDeviceId: "dev-1",
     });
   });
 
@@ -91,15 +91,15 @@ describe("NowPlaying", () => {
     expect(screen.getByText("Test Artist \u2014 Test Album")).toBeInTheDocument();
   });
 
-  it("shows device name", () => {
+  it("shows the current output name without a selector", () => {
     renderWithProviders(<NowPlaying />);
     expect(screen.getByText("Living Room")).toBeInTheDocument();
   });
 
-  it("shows active device volume slider", () => {
+  it("shows the playing group volume slider", () => {
     renderWithProviders(<NowPlaying />);
     expect(
-      screen.getByRole<HTMLInputElement>("slider", { name: "Volume for Living Room" }).value
+      screen.getByRole<HTMLInputElement>("slider", { name: "Playing group volume" }).value
     ).toBe("50");
   });
 
@@ -120,7 +120,7 @@ describe("NowPlaying", () => {
     renderWithProviders(<NowPlaying />);
     const bigButton = document.querySelector("button.w-16")!;
     fireEvent.click(bigButton);
-    expect(mockResume).toHaveBeenCalledWith("dev-1");
+    expect(mockResume).toHaveBeenCalledWith();
   });
 
   it("calls api.pause when pause is clicked while playing", () => {
@@ -128,14 +128,14 @@ describe("NowPlaying", () => {
     renderWithProviders(<NowPlaying />);
     const bigButton = document.querySelector("button.w-16")!;
     fireEvent.click(bigButton);
-    expect(mockPause).toHaveBeenCalledWith("dev-1");
+    expect(mockPause).toHaveBeenCalledWith();
   });
 
-  it("sets active device volume from the main slider", () => {
+  it("sets the playing group volume from the main slider", () => {
     renderWithProviders(<NowPlaying />);
-    fireEvent.change(screen.getByRole("slider", { name: "Volume for Living Room" }), {
+    fireEvent.change(screen.getByRole("slider", { name: "Playing group volume" }), {
       target: { value: "65" },
     });
-    expect(mockSetVolume).toHaveBeenCalledWith("dev-1", 0.65);
+    expect(mockSetVolume).toHaveBeenCalledWith(0.65);
   });
 });

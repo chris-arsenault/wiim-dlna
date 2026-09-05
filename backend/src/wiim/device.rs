@@ -177,15 +177,4 @@ impl DeviceManager {
             .find(|r| r.value().ip == ip)
             .map(|r| r.key().clone())
     }
-
-    /// Get the master device ID for a device (returns own ID if ungrouped/master).
-    pub fn master_id_for(&self, id: &str) -> Option<String> {
-        let device = self.get(id)?;
-        if let Some(ref group_id) = device.group_id {
-            if !device.is_master {
-                return Some(group_id.clone());
-            }
-        }
-        Some(device.id)
-    }
 }

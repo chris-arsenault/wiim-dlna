@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../../test-utils";
 import { QueueView } from "./QueueView";
-import { useDeviceStore } from "../../stores/deviceStore";
 import { usePlayerStore } from "../../stores/playerStore";
 
 const { mockGetQueue } = vi.hoisted(() => ({
@@ -19,18 +18,18 @@ vi.mock("../../api/client", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useDeviceStore.setState({ devices: [], activeDeviceId: null });
+  mockGetQueue.mockResolvedValue({ tracks: [], position: 0 });
   usePlayerStore.setState({ playing: false, currentTrack: null });
 });
 
 describe("QueueView rendering", () => {
-  it('shows "No device selected" when no active device', () => {
+  it("shows the one global queue even when no speakers are on", async () => {
     renderWithProviders(<QueueView />);
-    expect(screen.getByText("No device selected")).toBeInTheDocument();
+    expect(await screen.findByText("Queue is empty")).toBeInTheDocument();
+    expect(mockGetQueue).toHaveBeenCalledWith();
   });
 
   it("shows empty queue message when queue has no tracks", async () => {
-    useDeviceStore.setState({ activeDeviceId: "dev-1" });
     mockGetQueue.mockResolvedValue({ tracks: [], position: 0 });
     renderWithProviders(<QueueView />);
     await waitFor(() => {
@@ -39,7 +38,6 @@ describe("QueueView rendering", () => {
   });
 
   it("renders tracks in the queue", async () => {
-    useDeviceStore.setState({ activeDeviceId: "dev-1" });
     mockGetQueue.mockResolvedValue({
       tracks: [
         {
@@ -71,7 +69,6 @@ describe("QueueView rendering", () => {
 
 describe("QueueView track info", () => {
   it("shows track count footer", async () => {
-    useDeviceStore.setState({ activeDeviceId: "dev-1" });
     mockGetQueue.mockResolvedValue({
       tracks: [
         {
@@ -110,7 +107,6 @@ describe("QueueView track info", () => {
 
 describe("QueueView details", () => {
   it('singular "track" for single-track queue', async () => {
-    useDeviceStore.setState({ activeDeviceId: "dev-1" });
     mockGetQueue.mockResolvedValue({
       tracks: [
         {
@@ -131,7 +127,6 @@ describe("QueueView details", () => {
   });
 
   it('shows "Clear all" button when queue has tracks', async () => {
-    useDeviceStore.setState({ activeDeviceId: "dev-1" });
     mockGetQueue.mockResolvedValue({
       tracks: [
         { id: "t1", title: "Song", artist: null, album: null, duration: null, stream_url: null },

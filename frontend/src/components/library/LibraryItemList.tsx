@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, type LibraryItem } from "../../api/client";
-import { useDeviceStore } from "../../stores/deviceStore";
+import { selectPlaybackDevice, useDeviceStore } from "../../stores/deviceStore";
 import { usePlayerStore } from "../../stores/playerStore";
 import { TrackEditor } from "./TrackEditor";
 import { AddToPlaylistDialog } from "../playlists/AddToPlaylistDialog";
@@ -134,13 +134,13 @@ function TrackRow({
 }
 
 function useItemActions(containerId: string, onPlay?: () => void) {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
+  const hasOutput = useDeviceStore((state) => selectPlaybackDevice(state.devices) != null);
   const setCurrentTrack = usePlayerStore((s) => s.setCurrentTrack);
   const setPlaying = usePlayerStore((s) => s.setPlaying);
 
   const handleTrackPlay = async (item: LibraryItem) => {
-    if (!activeDeviceId) return;
-    await api.sessionPlay(activeDeviceId, { source_id: containerId, start_track_id: item.id });
+    if (!hasOutput) return;
+    await api.sessionPlay({ source_id: containerId, start_track_id: item.id });
     setCurrentTrack({
       id: item.id,
       title: item.title ?? "Unknown",
@@ -154,13 +154,12 @@ function useItemActions(containerId: string, onPlay?: () => void) {
   };
 
   const handleAddToQueue = async (item: LibraryItem) => {
-    if (!activeDeviceId) return;
-    await api.addToQueue(activeDeviceId, [item.id]);
+    await api.addToQueue([item.id]);
   };
 
   const handlePlayContainer = async (item: LibraryItem) => {
-    if (!activeDeviceId) return;
-    await api.sessionPlay(activeDeviceId, { source_id: item.id });
+    if (!hasOutput) return;
+    await api.sessionPlay({ source_id: item.id });
     setPlaying(true);
     onPlay?.();
   };
@@ -179,7 +178,7 @@ export function ItemList({
   containerId: string;
   onPlay?: () => void;
 }) {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
+  const hasOutput = useDeviceStore((state) => selectPlaybackDevice(state.devices) != null);
   const [editingTrack, setEditingTrack] = useState<LibraryItem | null>(null);
   const [playlistTarget, setPlaylistTarget] = useState<LibraryItem | null>(null);
   const { handleTrackPlay, handleAddToQueue, handlePlayContainer } = useItemActions(
@@ -201,7 +200,7 @@ export function ItemList({
                 onSelect={() => onSelect(item)}
                 onPlayAll={() => handlePlayContainer(item)}
                 onAddToPlaylist={() => setPlaylistTarget(item)}
-                showPlayAll={!!activeDeviceId}
+                showPlayAll={hasOutput}
               />
             ) : (
               <TrackRow

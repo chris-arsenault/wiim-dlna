@@ -1,17 +1,14 @@
-use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
-/// Persisted device configuration (survives server reboots).
+use rusqlite::{params, Connection};
+
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DeviceConfig {
     pub device_id: String,
     pub enabled: bool,
-    pub group_id: Option<String>,
-    pub is_master: bool,
 }
 
-/// SQLite-backed store for device configuration.
+/// SQLite-backed state for output membership and global UI state.
 pub struct DeviceConfigStore {
     path: String,
 }
@@ -25,59 +22,35 @@ impl DeviceConfigStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS device_config (
                 device_id TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                group_id TEXT,
-                is_master INTEGER NOT NULL DEFAULT 0
+                enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )
-        .expect("Failed to initialize device_config schema");
-
-        // Migrate: add columns if they don't exist (for existing databases).
-        let _ = conn.execute_batch(
-            "ALTER TABLE device_config ADD COLUMN group_id TEXT;
-             ALTER TABLE device_config ADD COLUMN is_master INTEGER NOT NULL DEFAULT 0;",
-        );
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS group_presets (
-                slot INTEGER PRIMARY KEY,
-                config TEXT NOT NULL
-            );",
-        )
-        .expect("Failed to initialize group_presets schema");
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS library_state (
-                device_id TEXT PRIMARY KEY,
-                path TEXT NOT NULL
-            );",
-        )
-        .expect("Failed to initialize library_state schema");
-
+        .expect("Failed to initialize device state schema");
         store
     }
 
-    /// Load all persisted device configs, keyed by device_id.
     pub fn load_all(&self) -> HashMap<String, DeviceConfig> {
         let conn = Connection::open(&self.path).unwrap();
-        let mut stmt = conn
-            .prepare("SELECT device_id, enabled, group_id, is_master FROM device_config")
+        let mut statement = conn
+            .prepare("SELECT device_id, enabled FROM device_config")
             .unwrap();
-        stmt.query_map([], |row| {
-            Ok(DeviceConfig {
-                device_id: row.get(0)?,
-                enabled: row.get::<_, i32>(1)? != 0,
-                group_id: row.get(2)?,
-                is_master: row.get::<_, i32>(3)? != 0,
+        statement
+            .query_map([], |row| {
+                Ok(DeviceConfig {
+                    device_id: row.get(0)?,
+                    enabled: row.get::<_, i32>(1)? != 0,
+                })
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .map(|c| (c.device_id.clone(), c))
-        .collect()
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|config| (config.device_id.clone(), config))
+            .collect()
     }
 
-    /// Save or update the enabled state for a device.
     pub fn save_enabled(&self, device_id: &str, enabled: bool) {
         let conn = Connection::open(&self.path).unwrap();
         conn.execute(
@@ -89,98 +62,23 @@ impl DeviceConfigStore {
         .ok();
     }
 
-    /// Save group membership for a device.
-    #[allow(dead_code)]
-    pub fn save_group(&self, device_id: &str, group_id: Option<&str>, is_master: bool) {
-        let conn = Connection::open(&self.path).unwrap();
-        conn.execute(
-            "INSERT INTO device_config (device_id, enabled, group_id, is_master)
-             VALUES (?1, 1, ?2, ?3)
-             ON CONFLICT(device_id) DO UPDATE SET group_id = excluded.group_id, is_master = excluded.is_master",
-            params![device_id, group_id, is_master as i32],
-        )
-        .ok();
-    }
-
-    /// Clear group membership for all devices in a group.
-    #[allow(dead_code)]
-    pub fn clear_group(&self, group_id: &str) {
-        let conn = Connection::open(&self.path).unwrap();
-        conn.execute(
-            "UPDATE device_config SET group_id = NULL, is_master = 0 WHERE group_id = ?1",
-            params![group_id],
-        )
-        .ok();
-    }
-
-    /// Save (upsert) a group preset into the given slot (1-5).
-    pub fn save_preset(&self, slot: u8, config: &str) {
-        let conn = Connection::open(&self.path).unwrap();
-        conn.execute(
-            "INSERT INTO group_presets (slot, config)
-             VALUES (?1, ?2)
-             ON CONFLICT(slot) DO UPDATE SET config = excluded.config",
-            params![slot as i32, config],
-        )
-        .ok();
-    }
-
-    /// Load a single group preset by slot number.
-    pub fn load_preset(&self, slot: u8) -> Option<String> {
+    pub fn load_app_state(&self, key: &str) -> Option<String> {
         let conn = Connection::open(&self.path).unwrap();
         conn.query_row(
-            "SELECT config FROM group_presets WHERE slot = ?1",
-            params![slot as i32],
+            "SELECT value FROM app_state WHERE key = ?1",
+            params![key],
             |row| row.get(0),
         )
         .ok()
     }
 
-    /// Load all group presets, keyed by slot number.
-    pub fn load_all_presets(&self) -> HashMap<u8, String> {
-        let conn = Connection::open(&self.path).unwrap();
-        let mut stmt = conn
-            .prepare("SELECT slot, config FROM group_presets")
-            .unwrap();
-        stmt.query_map([], |row| {
-            let slot: i32 = row.get(0)?;
-            let config: String = row.get(1)?;
-            Ok((slot as u8, config))
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
-    }
-
-    /// Delete a group preset from the given slot.
-    pub fn delete_preset(&self, slot: u8) {
+    pub fn save_app_state(&self, key: &str, value: &str) {
         let conn = Connection::open(&self.path).unwrap();
         conn.execute(
-            "DELETE FROM group_presets WHERE slot = ?1",
-            params![slot as i32],
-        )
-        .ok();
-    }
-
-    /// Load the persisted library browse path (opaque JSON) for a device.
-    pub fn load_library_path(&self, device_id: &str) -> Option<String> {
-        let conn = Connection::open(&self.path).unwrap();
-        conn.query_row(
-            "SELECT path FROM library_state WHERE device_id = ?1",
-            params![device_id],
-            |row| row.get(0),
-        )
-        .ok()
-    }
-
-    /// Save (upsert) the library browse path (opaque JSON) for a device.
-    pub fn save_library_path(&self, device_id: &str, path_json: &str) {
-        let conn = Connection::open(&self.path).unwrap();
-        conn.execute(
-            "INSERT INTO library_state (device_id, path)
+            "INSERT INTO app_state (key, value)
              VALUES (?1, ?2)
-             ON CONFLICT(device_id) DO UPDATE SET path = excluded.path",
-            params![device_id, path_json],
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
         )
         .ok();
     }

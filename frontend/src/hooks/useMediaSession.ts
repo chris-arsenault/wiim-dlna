@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { api } from "../api/client";
 import { usePlayerStore } from "../stores/playerStore";
-import { useDeviceStore } from "../stores/deviceStore";
+import { selectPlaybackDevice, useDeviceStore } from "../stores/deviceStore";
+import { setPlaybackVolume } from "./useDeviceVolume";
 
 const VOLUME_STEP = 0.05;
 const VOLUME_MIDPOINT = 0.5;
@@ -76,23 +77,16 @@ function handleVolumeChange(
 
   log(`volumechange delta=${delta.toFixed(3)}`);
 
-  const deviceId = useDeviceStore.getState().activeDeviceId;
-  if (!deviceId) {
-    log("no active device");
-    return;
-  }
-
-  const device = useDeviceStore.getState().devices.find((d) => d.id === deviceId);
+  const device = selectPlaybackDevice(useDeviceStore.getState().devices);
   if (!device) {
-    log("device not found");
+    log("no playback output");
     return;
   }
 
   const direction = delta > 0 ? VOLUME_STEP : -VOLUME_STEP;
   const newVolume = Math.max(0, Math.min(1, device.volume + direction));
   log(`vol ${device.volume.toFixed(2)} -> ${newVolume.toFixed(2)}`);
-  api.setVolume(deviceId, newVolume).catch((e) => log(`setVolume error: ${e}`));
-  useDeviceStore.getState().updateDevice(deviceId, { volume: newVolume });
+  setPlaybackVolume(newVolume).catch((e) => log(`setVolume error: ${e}`));
 }
 
 function useAudioActivation(
@@ -246,10 +240,10 @@ function useActionHandlers() {
       return;
     }
 
-    const getDeviceId = () => useDeviceStore.getState().activeDeviceId;
+    const hasOutput = () => selectPlaybackDevice(useDeviceStore.getState().devices) != null;
     const hasSession = () => usePlayerStore.getState().session !== null;
 
-    const actions = buildActionHandlers(getDeviceId, hasSession);
+    const actions = buildActionHandlers(hasOutput, hasSession);
 
     let registered = 0;
     for (const [action, handler] of actions) {
@@ -275,7 +269,7 @@ function useActionHandlers() {
 }
 
 function buildActionHandlers(
-  getDeviceId: () => string | null,
+  hasOutput: () => boolean,
   hasSession: () => boolean
 ): [MediaSessionAction, MediaSessionActionHandler][] {
   return [
@@ -283,60 +277,54 @@ function buildActionHandlers(
       "play",
       () => {
         log("action: play");
-        const id = getDeviceId();
-        if (id) api.resume(id).catch((e) => log(`play error: ${e}`));
-        else log("no active device for play");
+        if (hasOutput()) api.resume().catch((e) => log(`play error: ${e}`));
+        else log("no playback output for play");
       },
     ],
     [
       "pause",
       () => {
         log("action: pause");
-        const id = getDeviceId();
-        if (id) api.pause(id).catch((e) => log(`pause error: ${e}`));
-        else log("no active device for pause");
+        if (hasOutput()) api.pause().catch((e) => log(`pause error: ${e}`));
+        else log("no playback output for pause");
       },
     ],
     [
       "nexttrack",
       () => {
         log("action: next");
-        const id = getDeviceId();
-        if (!id) {
-          log("no active device for next");
+        if (!hasOutput()) {
+          log("no playback output for next");
           return;
         }
-        if (hasSession()) api.sessionNext(id).catch((e) => log(`next error: ${e}`));
-        else api.next(id).catch((e) => log(`next error: ${e}`));
+        if (hasSession()) api.sessionNext().catch((e) => log(`next error: ${e}`));
+        else api.next().catch((e) => log(`next error: ${e}`));
       },
     ],
     [
       "previoustrack",
       () => {
         log("action: prev");
-        const id = getDeviceId();
-        if (!id) {
-          log("no active device for prev");
+        if (!hasOutput()) {
+          log("no playback output for prev");
           return;
         }
-        if (hasSession()) api.sessionPrev(id).catch((e) => log(`prev error: ${e}`));
-        else api.prev(id).catch((e) => log(`prev error: ${e}`));
+        if (hasSession()) api.sessionPrev().catch((e) => log(`prev error: ${e}`));
+        else api.prev().catch((e) => log(`prev error: ${e}`));
       },
     ],
     [
       "seekforward",
       () => {
         log("action: seekforward");
-        const id = getDeviceId();
-        if (id) api.seekForward(id).catch((e) => log(`seekfwd error: ${e}`));
+        if (hasOutput()) api.seekForward().catch((e) => log(`seekfwd error: ${e}`));
       },
     ],
     [
       "seekbackward",
       () => {
         log("action: seekbackward");
-        const id = getDeviceId();
-        if (id) api.seekBackward(id).catch((e) => log(`seekback error: ${e}`));
+        if (hasOutput()) api.seekBackward().catch((e) => log(`seekback error: ${e}`));
       },
     ],
   ];

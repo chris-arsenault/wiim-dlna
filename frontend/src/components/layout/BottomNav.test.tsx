@@ -3,11 +3,11 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { BottomNav } from "./BottomNav";
 
 describe("BottomNav", () => {
-  it("renders all four tabs", () => {
+  it("renders all tabs", () => {
     render(<BottomNav active="library" onNavigate={vi.fn()} />);
     expect(screen.getByText("Library")).toBeInTheDocument();
     expect(screen.getByText("Queue")).toBeInTheDocument();
-    expect(screen.getByText("Rooms")).toBeInTheDocument();
+    expect(screen.getByText("Speakers")).toBeInTheDocument();
     expect(screen.getByText("EQ")).toBeInTheDocument();
   });
 
@@ -16,7 +16,7 @@ describe("BottomNav", () => {
     render(<BottomNav active="library" onNavigate={onNavigate} />);
     fireEvent.click(screen.getByText("Queue"));
     expect(onNavigate).toHaveBeenCalledWith("queue");
-    fireEvent.click(screen.getByText("Rooms"));
+    fireEvent.click(screen.getByText("Speakers"));
     expect(onNavigate).toHaveBeenCalledWith("devices");
   });
 

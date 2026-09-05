@@ -63,20 +63,20 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
 }
 
 beforeEach(() => {
-  useDeviceStore.setState({ devices: [], activeDeviceId: null });
+  useDeviceStore.setState({ devices: [], settingsDeviceId: null });
   vi.restoreAllMocks();
 });
 
 describe("EQSettings basic rendering", () => {
-  it('shows "No device selected" when no active device', () => {
+  it("shows the empty WiiM state when no settings device exists", () => {
     renderWithProviders(<EQSettings />);
-    expect(screen.getByText("No device selected")).toBeInTheDocument();
+    expect(screen.getByText("No WiiM speakers found")).toBeInTheDocument();
   });
 
   it("shows device info when device is selected", () => {
     useDeviceStore.setState({
       devices: [makeDevice({ id: "a", name: "Kitchen", ip: `10.0.0.${5}` })],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     expect(screen.getByText("Kitchen")).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe("EQSettings basic rendering", () => {
           },
         }),
       ],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     expect(screen.getByText("EQ Unavailable")).toBeInTheDocument();
@@ -104,7 +104,7 @@ describe("EQSettings basic rendering", () => {
   it("renders three tabs when https_api is available", () => {
     useDeviceStore.setState({
       devices: [makeDevice({ id: "a" })],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     expect(screen.getByText("Presets")).toBeInTheDocument();
@@ -117,7 +117,7 @@ describe("EQSettings tabs and interactions", () => {
   it("loads and displays EQ presets", async () => {
     useDeviceStore.setState({
       devices: [makeDevice({ id: "a" })],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     await waitFor(() => {
@@ -130,7 +130,7 @@ describe("EQSettings tabs and interactions", () => {
   it("shows input source buttons on Audio tab", async () => {
     useDeviceStore.setState({
       devices: [makeDevice({ id: "a" })],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     fireEvent.click(screen.getByText("Audio"));
@@ -146,7 +146,7 @@ describe("EQSettings tabs and interactions", () => {
   it("calls switchSource when a source button is clicked", async () => {
     useDeviceStore.setState({
       devices: [makeDevice({ id: "a" })],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     fireEvent.click(screen.getByText("Audio"));
@@ -162,7 +162,7 @@ describe("EQSettings tabs and interactions", () => {
   it("shows WiFi signal strength and SSID on Audio tab", async () => {
     useDeviceStore.setState({
       devices: [makeDevice({ id: "a" })],
-      activeDeviceId: "a",
+      settingsDeviceId: "a",
     });
     renderWithProviders(<EQSettings />);
     fireEvent.click(screen.getByText("Audio"));

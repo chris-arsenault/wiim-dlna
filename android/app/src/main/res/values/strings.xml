@@ -23,7 +23,7 @@
     <string name="status_mfa_required">Enter your authenticator code.</string>
     <string name="widget_default_device">Airwave</string>
     <string name="widget_nothing_playing">Nothing playing</string>
-    <string name="widget_cycle_hint">Tap device name to cycle</string>
+    <string name="widget_cycle_hint">All speakers off</string>
     <string name="action_volume_down">Volume down</string>
     <string name="action_play_pause">Play or pause</string>
     <string name="action_next">Next track</string>

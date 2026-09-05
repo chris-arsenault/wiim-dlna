@@ -5,6 +5,28 @@ import { LibraryBrowser } from "./LibraryBrowser";
 import { useDeviceStore } from "../../stores/deviceStore";
 import { useUiStore } from "../../stores/uiStore";
 
+const TEST_DEVICE = {
+  id: "dev-1",
+  name: "Living Room",
+  ip: "192.0.2.10",
+  model: "WiiM Mini",
+  firmware: null,
+  device_type: "wiim",
+  enabled: true,
+  capabilities: {
+    av_transport: true,
+    rendering_control: true,
+    wiim_extended: true,
+    https_api: true,
+  },
+  volume: 0.5,
+  muted: false,
+  channel: null,
+  source: null,
+  group_id: null,
+  is_master: false,
+} as const;
+
 const { mockBrowse, mockSearch, mockSessionPlay, mockGetLibraryState, mockSetLibraryState } =
   vi.hoisted(() => ({
     mockBrowse: vi.fn(),
@@ -30,7 +52,7 @@ vi.mock("../../api/client", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetLibraryState.mockResolvedValue({ path: [{ id: "0", title: "Library" }] });
-  useDeviceStore.setState({ devices: [], activeDeviceId: "dev-1" });
+  useDeviceStore.setState({ devices: [TEST_DEVICE], settingsDeviceId: "dev-1" });
   useUiStore.setState({ drawer: null });
 });
 
@@ -213,7 +235,7 @@ describe("LibraryBrowser playback", () => {
     fireEvent.click(screen.getByText("Wish You Were Here"));
 
     await waitFor(() => {
-      expect(mockSessionPlay).toHaveBeenCalledWith("dev-1", {
+      expect(mockSessionPlay).toHaveBeenCalledWith({
         source_id: "1",
         start_track_id: "t1",
       });

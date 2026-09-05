@@ -26,7 +26,7 @@ const DRAWER_TITLES: Record<string, string> = {
   library: "Library",
   playlists: "Playlists",
   queue: "Queue",
-  devices: "Rooms",
+  devices: "Speakers",
   settings: "EQ",
 };
 
@@ -107,7 +107,7 @@ function useSSEHandlers() {
       setCurrentTrack(null);
     },
     session_started: (data) => {
-      const { session } = data as { device_id: string; session: SessionInfo };
+      const { session } = data as { target_id: string; session: SessionInfo };
       setSession(session);
       setPlaying(true);
     },
@@ -144,8 +144,7 @@ function handlePlaybackState(data: unknown) {
     session?: SessionInfo | null;
     allowed_actions?: string[] | null;
   };
-  const activeId = useDeviceStore.getState().activeDeviceId;
-  if (state.target_id !== activeId) return;
+  if (state.target_id !== "playing") return;
   const session = state.session ?? null;
   const currentId = usePlayerStore.getState().currentTrack?.id;
   const trackChanged = state.current_track && state.current_track.id !== currentId;
@@ -175,11 +174,11 @@ function handleTrackChanged(
     } | null
   ) => void
 ) {
-  const { track } = data as {
-    device_id: string;
+  const { target_id, track } = data as {
+    target_id: string;
     track: { id: string; title: string; artist: string | null };
   };
-  if (track) {
+  if (target_id === "playing" && track) {
     setCurrentTrack({
       id: track.id,
       title: track.title,
@@ -192,26 +191,22 @@ function handleTrackChanged(
 }
 
 function handleSleepTimerChanged(data: unknown) {
-  const { remaining_seconds, device_id } = data as {
-    device_id: string;
+  const { remaining_seconds, target_id } = data as {
+    target_id: string;
     remaining_seconds: number | null;
   };
-  const activeId = useDeviceStore.getState().activeDeviceId;
-  if (device_id !== activeId) return;
+  if (target_id !== "playing") return;
   usePlayerStore.setState({ sleepRemaining: remaining_seconds });
 }
 
 function handleQueueChanged(data: unknown, qc: ReturnType<typeof useQueryClient>) {
-  const { device_id, tracks, position } = data as {
-    device_id: string;
+  const { target_id, tracks, position } = data as {
+    target_id: string;
     tracks?: unknown[];
     position?: number;
   };
-  if (tracks !== undefined) {
-    const activeId = useDeviceStore.getState().activeDeviceId;
-    if (device_id === activeId) {
-      qc.setQueryData(["queue", activeId], { tracks, position });
-    }
+  if (target_id === "playing" && tracks !== undefined) {
+    qc.setQueryData(["queue"], { tracks, position });
   } else {
     qc.invalidateQueries({ queryKey: ["queue"] });
   }

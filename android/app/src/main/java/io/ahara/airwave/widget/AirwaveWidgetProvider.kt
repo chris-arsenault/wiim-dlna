@@ -18,7 +18,6 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
         when (intent.action) {
-            ACTION_CYCLE_DEVICE,
             ACTION_PLAY_PAUSE,
             ACTION_NEXT,
             ACTION_VOLUME_UP,
@@ -38,7 +37,6 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
     }
 
     companion object {
-        const val ACTION_CYCLE_DEVICE = "io.ahara.airwave.action.CYCLE_DEVICE"
         const val ACTION_PLAY_PAUSE = "io.ahara.airwave.action.PLAY_PAUSE"
         const val ACTION_NEXT = "io.ahara.airwave.action.NEXT"
         const val ACTION_VOLUME_UP = "io.ahara.airwave.action.VOLUME_UP"
@@ -64,17 +62,14 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
         private fun handleAction(context: Context, action: String) {
             val api = apiOrThrow(context)
             when (action) {
-                ACTION_CYCLE_DEVICE -> cycleDevice(context, api)
                 ACTION_PLAY_PAUSE -> {
-                    val device = selectedDevice(context, api)
-                    val state = api.playback(device.id)
-                    if (state.playing) api.pause(device.id) else api.resume(device.id)
+                    val state = api.playback()
+                    if (state.playing) api.pause() else api.resume()
                     AirwavePrefs.setPlaying(context, !state.playing)
                     updateAll(context, if (state.playing) "Paused" else "Playing")
                 }
                 ACTION_NEXT -> {
-                    val device = selectedDevice(context, api)
-                    api.next(device.id)
+                    api.next()
                     updateAll(context, "Next track")
                 }
                 ACTION_VOLUME_UP -> adjustVolume(context, api, VOLUME_STEP)
@@ -86,69 +81,54 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
         private fun refresh(context: Context) {
             val api = apiOrThrow(context)
             val devices = api.devices()
-            val selected = resolveSelectedDevice(context, devices)
-            val status = if (selected != null) {
-                val state = runCatching { api.playback(selected.id) }.getOrNull()
-                AirwavePrefs.setPlaying(context, state?.playing == true)
-                AirwavePrefs.setNowPlaying(
-                    context,
-                    state?.title ?: "Nothing playing",
-                    playbackSubtitle(state, selected),
-                )
-                val stateText = if (state?.playing == true) "Playing" else "Paused"
-                "$stateText • vol ${Math.round(selected.volume * 100)}"
+            val state = runCatching { api.playback() }.getOrNull()
+            AirwavePrefs.setPlaying(context, state?.playing == true)
+            AirwavePrefs.setNowPlaying(
+                context,
+                state?.title ?: "Nothing playing",
+                playbackSubtitle(state, devices),
+            )
+            AirwavePrefs.setOutputNames(context, outputLabel(devices))
+            val master = playbackDevice(devices)
+            val stateText = if (state?.playing == true) "Playing" else "Paused"
+            val status = if (master != null) {
+                "$stateText • vol ${Math.round(master.volume * 100)}"
             } else {
-                AirwavePrefs.setNowPlaying(context, "No device selected", "No enabled devices")
-                "No enabled devices"
+                "All speakers off"
             }
             updateAll(context, status)
         }
 
-        private fun playbackSubtitle(state: PlaybackState?, device: AirwaveDevice): String {
-            if (state?.title == null) return "Tap ${device.name} to cycle devices"
+        private fun playbackSubtitle(
+            state: PlaybackState?,
+            devices: List<AirwaveDevice>,
+        ): String {
+            if (state?.title == null) return outputLabel(devices)
             return listOfNotNull(state.artist, state.album ?: state.source)
                 .takeIf { it.isNotEmpty() }
                 ?.joinToString(" • ")
-                ?: device.name
-        }
-
-        private fun cycleDevice(context: Context, api: AirwaveApi) {
-            val devices = api.devices()
-            if (devices.isEmpty()) {
-                AirwavePrefs.setDevice(context, null, null)
-                updateAll(context, "No enabled devices")
-                return
-            }
-            val currentId = AirwavePrefs.deviceId(context)
-            val currentIndex = devices.indexOfFirst { it.id == currentId }
-            val next = devices[(currentIndex + 1).floorMod(devices.size)]
-            AirwavePrefs.setDevice(context, next.id, next.name)
-            updateAll(context, "Selected ${next.name}")
+                ?: outputLabel(devices)
         }
 
         private fun adjustVolume(context: Context, api: AirwaveApi, delta: Double) {
-            val device = selectedDevice(context, api)
-            api.setVolume(device.id, device.volume + delta)
+            val device = playbackDevice(api.devices())
+                ?: throw IllegalStateException("All speakers are off")
+            api.setVolume(device.volume + delta)
             val direction = if (delta > 0) "up" else "down"
             updateAll(context, "Volume $direction")
         }
 
-        private fun selectedDevice(context: Context, api: AirwaveApi): AirwaveDevice =
-            resolveSelectedDevice(context, api.devices())
-                ?: throw IllegalStateException("No enabled devices")
+        private fun playbackDevice(devices: List<AirwaveDevice>): AirwaveDevice? =
+            devices.filter { it.avTransport }
+                .sortedBy { it.id }
+                .let { outputs ->
+                    outputs.firstOrNull { it.isMaster && it.groupId == it.id }
+                        ?: outputs.firstOrNull { it.groupId == null }
+                        ?: outputs.firstOrNull()
+                }
 
-        private fun resolveSelectedDevice(
-            context: Context,
-            devices: List<AirwaveDevice>,
-        ): AirwaveDevice? {
-            if (devices.isEmpty()) return null
-            val currentId = AirwavePrefs.deviceId(context)
-            val selected = devices.firstOrNull { it.id == currentId } ?: devices.first()
-            if (selected.id != currentId || AirwavePrefs.deviceName(context) != selected.name) {
-                AirwavePrefs.setDevice(context, selected.id, selected.name)
-            }
-            return selected
-        }
+        private fun outputLabel(devices: List<AirwaveDevice>): String =
+            if (devices.isEmpty()) "All speakers off" else devices.joinToString(" + ") { it.name }
 
         private fun apiOrThrow(context: Context): AirwaveApi {
             val serverUrl = AirwavePrefs.serverUrl(context)
@@ -173,13 +153,11 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
             val subtitle = AirwavePrefs.nowSubtitle(context).ifBlank { status ?: "Ready" }
             views.setTextViewText(R.id.now_title, AirwavePrefs.nowTitle(context).ifBlank { "Airwave" })
             views.setTextViewText(R.id.now_subtitle, subtitle)
-            setDeviceText(context, views)
+            setOutputText(context, views)
             views.setImageViewResource(
                 R.id.play_pause,
                 if (AirwavePrefs.playing(context)) R.drawable.ic_pause else R.drawable.ic_play,
             )
-            views.setOnClickPendingIntent(R.id.device_name, pendingIntent(context, ACTION_CYCLE_DEVICE))
-            views.setOnClickPendingIntent(R.id.now_subtitle, pendingIntent(context, ACTION_CYCLE_DEVICE))
             views.setOnClickPendingIntent(R.id.volume_down, pendingIntent(context, ACTION_VOLUME_DOWN))
             views.setOnClickPendingIntent(R.id.play_pause, pendingIntent(context, ACTION_PLAY_PAUSE))
             views.setOnClickPendingIntent(R.id.next, pendingIntent(context, ACTION_NEXT))
@@ -187,14 +165,16 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
             manager.updateAppWidget(widgetId, views)
         }
 
-        private fun setDeviceText(context: Context, views: RemoteViews) {
+        private fun setOutputText(context: Context, views: RemoteViews) {
             val serverUrl = AirwavePrefs.serverUrl(context)
             if (serverUrl.isBlank()) {
                 views.setTextViewText(R.id.device_name, "Set server URL")
                 return
             }
-            val deviceName = AirwavePrefs.deviceName(context)
-            views.setTextViewText(R.id.device_name, deviceName ?: "Tap to choose device")
+            views.setTextViewText(
+                R.id.device_name,
+                AirwavePrefs.outputNames(context).ifBlank { "All speakers off" },
+            )
         }
 
         private fun pendingIntent(context: Context, action: String): PendingIntent {
@@ -202,7 +182,5 @@ class AirwaveWidgetProvider : AppWidgetProvider() {
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             return PendingIntent.getBroadcast(context, action.hashCode(), intent, flags)
         }
-
-        private fun Int.floorMod(modulus: Int): Int = ((this % modulus) + modulus) % modulus
     }
 }

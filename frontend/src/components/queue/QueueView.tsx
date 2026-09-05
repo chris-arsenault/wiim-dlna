@@ -1,41 +1,37 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type QueueTrack } from "../../api/client";
-import { useDeviceStore } from "../../stores/deviceStore";
 import { usePlayerStore } from "../../stores/playerStore";
 
-function useQueueActions(activeDeviceId: string | null) {
+function useQueueActions() {
   const queryClient = useQueryClient();
 
   const handleRemove = useCallback(
     async (index: number) => {
-      if (!activeDeviceId) return;
-      await api.removeFromQueue(activeDeviceId, index);
-      queryClient.invalidateQueries({ queryKey: ["queue", activeDeviceId] });
+      await api.removeFromQueue(index);
+      queryClient.invalidateQueries({ queryKey: ["queue"] });
     },
-    [activeDeviceId, queryClient]
+    [queryClient]
   );
 
   const handleClear = useCallback(async () => {
-    if (!activeDeviceId) return;
-    await api.clearQueue(activeDeviceId);
-    queryClient.invalidateQueries({ queryKey: ["queue", activeDeviceId] });
-  }, [activeDeviceId, queryClient]);
+    await api.clearQueue();
+    queryClient.invalidateQueries({ queryKey: ["queue"] });
+  }, [queryClient]);
 
   const handleDrop = useCallback(
     async (fromIndex: number, toIndex: number) => {
-      if (!activeDeviceId || fromIndex === toIndex) return;
-      await api.moveInQueue(activeDeviceId, fromIndex, toIndex);
-      queryClient.invalidateQueries({ queryKey: ["queue", activeDeviceId] });
+      if (fromIndex === toIndex) return;
+      await api.moveInQueue(fromIndex, toIndex);
+      queryClient.invalidateQueries({ queryKey: ["queue"] });
     },
-    [activeDeviceId, queryClient]
+    [queryClient]
   );
 
   return { handleRemove, handleClear, handleDrop };
 }
 
 export function QueueView() {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -43,12 +39,11 @@ export function QueueView() {
   const listRef = useRef<HTMLDivElement>(null);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["queue", activeDeviceId],
-    queryFn: () => api.getQueue(activeDeviceId!),
-    enabled: !!activeDeviceId,
+    queryKey: ["queue"],
+    queryFn: () => api.getQueue(),
   });
 
-  const { handleRemove, handleClear, handleDrop } = useQueueActions(activeDeviceId);
+  const { handleRemove, handleClear, handleDrop } = useQueueActions();
   const { handleTouchMove, handleTouchEnd, handleTouchStart } = useTouchDrag(
     touchDragRef,
     listRef,
@@ -60,14 +55,6 @@ export function QueueView() {
 
   const tracks = data?.tracks ?? [];
   const position = data?.position ?? 0;
-
-  if (!activeDeviceId) {
-    return (
-      <div className="text-center py-12 text-[var(--color-text-secondary)] text-sm">
-        No device selected
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-3">

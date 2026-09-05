@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type LibraryItem, type ContainerInfo } from "../../api/client";
-import { useDeviceStore } from "../../stores/deviceStore";
+import { selectPlaybackDevice, useDeviceStore } from "../../stores/deviceStore";
 import { usePlayerStore } from "../../stores/playerStore";
 import { LIBRARY_ROOT, type BreadcrumbEntry } from "../../stores/uiStore";
 import { BulkAlbumArtistDialog, RenameArtistDialog } from "./TrackEditor";
@@ -101,22 +101,15 @@ function useLibraryData(currentId: string, searching: boolean, searchQuery: stri
 }
 
 export function LibraryBrowser({ onPlay }: { onPlay?: () => void }) {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const libraryState = useQuery({
-    queryKey: ["library-state", activeDeviceId],
-    queryFn: async () => {
-      if (!activeDeviceId) return { path: [LIBRARY_ROOT] };
-      return api.getLibraryState(activeDeviceId);
-    },
+    queryKey: ["library-state"],
+    queryFn: () => api.getLibraryState(),
   });
   const saveLibraryState = useMutation({
-    mutationFn: async (nextPath: BreadcrumbEntry[]) => {
-      if (!activeDeviceId) return;
-      await api.setLibraryState(activeDeviceId, nextPath);
-    },
+    mutationFn: (nextPath: BreadcrumbEntry[]) => api.setLibraryState(nextPath),
   });
 
   const path = libraryState.data?.path ?? [LIBRARY_ROOT];
@@ -126,7 +119,7 @@ export function LibraryBrowser({ onPlay }: { onPlay?: () => void }) {
 
   const setPath = (nextPath: BreadcrumbEntry[]) => {
     const normalized = nextPath.length ? nextPath : [LIBRARY_ROOT];
-    queryClient.setQueryData(["library-state", activeDeviceId], { path: normalized });
+    queryClient.setQueryData(["library-state"], { path: normalized });
     saveLibraryState.mutate(normalized);
   };
 
@@ -256,7 +249,7 @@ function ContainerHeaderActions({
 }
 
 function ContainerHeader({ info, onPlay }: { info: ContainerInfo; onPlay?: () => void }) {
-  const activeDeviceId = useDeviceStore((s) => s.activeDeviceId);
+  const hasOutput = useDeviceStore((state) => selectPlaybackDevice(state.devices) != null);
   const setPlaying = usePlayerStore((s) => s.setPlaying);
   const [showAlbumArtist, setShowAlbumArtist] = useState(false);
   const [showRename, setShowRename] = useState(false);
@@ -266,8 +259,8 @@ function ContainerHeader({ info, onPlay }: { info: ContainerInfo; onPlay?: () =>
   const isArtist = info.class === "object.container.person.musicArtist";
 
   const handleQueueAll = async () => {
-    if (!activeDeviceId) return;
-    await api.sessionPlay(activeDeviceId, { source_id: info.id });
+    if (!hasOutput) return;
+    await api.sessionPlay({ source_id: info.id });
     setPlaying(true);
     onPlay?.();
   };
@@ -281,7 +274,7 @@ function ContainerHeader({ info, onPlay }: { info: ContainerInfo; onPlay?: () =>
         <ContainerHeaderActions
           isAlbum={isAlbum}
           isArtist={isArtist}
-          canPlay={!!activeDeviceId && (isArtist || isAlbum)}
+          canPlay={hasOutput && (isArtist || isAlbum)}
           onEditAlbumArtist={() => setShowAlbumArtist(true)}
           onRename={() => setShowRename(true)}
           onPlayAll={handleQueueAll}

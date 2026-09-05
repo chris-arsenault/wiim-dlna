@@ -1,33 +1,22 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { DeviceManager } from "./DeviceManager";
-import { useDeviceStore } from "../../stores/deviceStore";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Device } from "../../api/client";
+import { useDeviceStore } from "../../stores/deviceStore";
+import { DeviceManager } from "./DeviceManager";
 
-vi.mock("../../api/client", () => ({
-  api: {
-    setVolume: vi.fn(() => Promise.resolve()),
-    toggleMute: vi.fn(() => Promise.resolve()),
-    createGroup: vi.fn(() => Promise.resolve()),
-    dissolveGroup: vi.fn(() => Promise.resolve()),
-    setEnabled: vi.fn(() => Promise.resolve()),
-    renameDevice: vi.fn(() => Promise.resolve()),
-    getChannel: vi.fn(() => Promise.resolve({ channel: "Stereo" })),
-    setChannel: vi.fn(() => Promise.resolve()),
-    getPresets: vi.fn(() => Promise.resolve({ presets: {} })),
-    savePreset: vi.fn(() => Promise.resolve()),
-    loadPreset: vi.fn(() => Promise.resolve()),
-    deletePreset: vi.fn(() => Promise.resolve()),
-  },
+const { mockSetEnabled } = vi.hoisted(() => ({
+  mockSetEnabled: vi.fn(() => Promise.resolve()),
 }));
 
-const TEST_DEVICE_IP = `192.168.1.${10}`;
+vi.mock("../../api/client", () => ({
+  api: { setEnabled: mockSetEnabled },
+}));
 
 function makeDevice(overrides: Partial<Device> = {}): Device {
   return {
     id: "dev-1",
     name: "Living Room",
-    ip: TEST_DEVICE_IP,
+    ip: `192.168.1.${10}`,
     model: "WiiM Pro",
     firmware: "4.8.1",
     device_type: "wiim",
@@ -49,89 +38,48 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
 }
 
 beforeEach(() => {
-  useDeviceStore.setState({ devices: [], activeDeviceId: null });
+  vi.clearAllMocks();
+  useDeviceStore.setState({ devices: [], settingsDeviceId: null });
 });
 
-describe("DeviceManager rendering", () => {
-  it("shows discovery message when no devices", () => {
+describe("DeviceManager", () => {
+  it("shows WiiM discovery state when no speakers are known", () => {
     render(<DeviceManager />);
-    expect(screen.getByText("Discovering devices...")).toBeInTheDocument();
+    expect(screen.getByText("Discovering WiiM speakers...")).toBeInTheDocument();
   });
 
-  it("renders device tiles with names", () => {
+  it("renders each speaker as an on/off output", () => {
     useDeviceStore.setState({
       devices: [
-        makeDevice({ id: "a", name: "Kitchen", model: "WiiM Mini" }),
-        makeDevice({ id: "b", name: "Bedroom", model: "WiiM Pro" }),
+        makeDevice({ id: "a", name: "Kitchen" }),
+        makeDevice({ id: "b", name: "Bedroom", enabled: false }),
       ],
-      activeDeviceId: "a",
     });
     render(<DeviceManager />);
-    expect(screen.getByText("Kitchen")).toBeInTheDocument();
-    expect(screen.getByText("Bedroom")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Kitchen output" })).toHaveAttribute(
+      "aria-checked",
+      "true"
+    );
+    expect(screen.getByRole("switch", { name: "Bedroom output" })).toHaveAttribute(
+      "aria-checked",
+      "false"
+    );
   });
 
-  it("shows Master badge in grouped tile", () => {
-    useDeviceStore.setState({
-      devices: [
-        makeDevice({ id: "a", name: "Main", is_master: true, group_id: "a" }),
-        makeDevice({ id: "b", name: "Follower", group_id: "a" }),
-      ],
-      activeDeviceId: "a",
-    });
+  it("turns a speaker off through output membership and updates after success", async () => {
+    useDeviceStore.setState({ devices: [makeDevice({ id: "a", name: "Kitchen" })] });
     render(<DeviceManager />);
-    expect(screen.getByText("M")).toBeInTheDocument();
-    expect(screen.getByText("Group")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Kitchen output" }));
+    await waitFor(() => expect(mockSetEnabled).toHaveBeenCalledWith("a", false));
+    expect(useDeviceStore.getState().devices[0].enabled).toBe(false);
   });
 
-  it("renders volume buttons with correct percentage", () => {
-    useDeviceStore.setState({
-      devices: [makeDevice({ id: "a", volume: 0.75 })],
-      activeDeviceId: "a",
-    });
+  it("does not expose grouping, presets, mute, or volume controls", () => {
+    useDeviceStore.setState({ devices: [makeDevice()] });
     render(<DeviceManager />);
-    expect(screen.getByText("75")).toBeInTheDocument();
-  });
-
-  it("shows preset buttons", () => {
-    useDeviceStore.setState({
-      devices: [makeDevice()],
-      activeDeviceId: "dev-1",
-    });
-    render(<DeviceManager />);
-    expect(screen.getByText("Presets")).toBeInTheDocument();
-    expect(screen.getByText("1")).toBeInTheDocument();
-    expect(screen.getByText("5")).toBeInTheDocument();
-  });
-
-  it("renders WiiM badge for wiim devices", () => {
-    useDeviceStore.setState({
-      devices: [makeDevice({ device_type: "wiim" })],
-      activeDeviceId: "dev-1",
-    });
-    render(<DeviceManager />);
-    expect(screen.getByText("WiiM")).toBeInTheDocument();
-  });
-});
-
-describe("DeviceManager interactions", () => {
-  it("renders UPnP badge for non-wiim devices", () => {
-    useDeviceStore.setState({
-      devices: [makeDevice({ device_type: "renderer" })],
-      activeDeviceId: "dev-1",
-    });
-    render(<DeviceManager />);
-    expect(screen.getByText("UPnP")).toBeInTheDocument();
-  });
-
-  it("calls setVolume on plus button click", async () => {
-    const { api } = vi.mocked(await import("../../api/client"));
-    useDeviceStore.setState({
-      devices: [makeDevice({ id: "a", volume: 0.5 })],
-      activeDeviceId: "a",
-    });
-    render(<DeviceManager />);
-    fireEvent.click(screen.getByRole("button", { name: "Volume up Living Room" }));
-    expect(api.setVolume).toHaveBeenCalledWith("a", 0.55);
+    expect(screen.queryByText("Group")).toBeNull();
+    expect(screen.queryByText("Presets")).toBeNull();
+    expect(screen.queryByTitle("Mute")).toBeNull();
+    expect(screen.queryByRole("slider")).toBeNull();
   });
 });

@@ -12,6 +12,8 @@ use super::queue::QueueManager;
 use super::session::SessionManager;
 use super::timer::SleepTimerManager;
 
+pub const PLAYBACK_TARGET_ID: &str = "playing";
+
 #[derive(Clone)]
 pub struct ControlState {
     pub devices: Arc<DeviceManager>,
@@ -23,6 +25,7 @@ pub struct ControlState {
     pub sessions: Arc<SessionManager>,
     pub art_cache: Arc<ArtCache>,
     pub sleep_timers: SleepTimerManager,
+    pub output_lock: Arc<tokio::sync::Mutex<()>>,
     pub base_url: String,
     pub collector_ready: Arc<AtomicBool>,
 }
