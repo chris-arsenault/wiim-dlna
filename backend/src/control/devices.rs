@@ -17,6 +17,8 @@ fn device_to_response(d: &crate::wiim::device::WiimDevice) -> DeviceResponse {
         firmware: d.firmware.clone(),
         device_type: d.device_type.clone(),
         enabled: d.enabled,
+        output_target: d.output_target,
+        output_error: d.output_error.clone(),
         capabilities: DeviceCapabilitiesResponse {
             av_transport: d.capabilities.av_transport,
             rendering_control: d.capabilities.rendering_control,

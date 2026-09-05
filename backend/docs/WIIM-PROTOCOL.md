@@ -58,6 +58,15 @@ GET https://{slave_ip}/httpapi.asp?command=ConnectMasterAp:JoinGroupMaster:eth{m
 
 The `eth` and `wifi` prefixes are part of the Linkplay protocol. For WiFi-only devices like WiiM Mini, both are set to the same IP.
 
+An `OK` response acknowledges the command; it does not mean the multiroom
+topology has converged. WiiM hardware can take 30–60 seconds to finish a join
+or detach. Airwave therefore sends each topology command once, polls
+`GetInfoEx` for up to 90 seconds per phase, and requires two complete matching
+topology observations five seconds apart. Any mismatch or read failure resets
+that stability count. Airwave rejects overlapping output changes while that
+observation is pending. A timeout is surfaced to the user and is not retried
+automatically.
+
 ### Dissolving a Group
 
 Send to the **master** device, once per slave:
@@ -89,7 +98,11 @@ GET https://{master_ip}/httpapi.asp?command=multiroom:getSlaveList
 
 ### Group State is Device-Canonical
 
-The device is the single source of truth for group state. Other apps (WiiM app, Spotify) can create/dissolve groups at any time. Our server reads group state from devices on every discovery cycle and never persists group membership to the database.
+The device is the single source of truth for completed group state. Other apps
+(WiiM app, Spotify) can create or dissolve groups at any time. Airwave reads
+group state during discovery, but suppresses those intermediate observations
+while one of its own topology transitions is pending. Airwave persists desired
+on/off output membership, not physical group membership.
 
 ### WiiM App vs Our Grouping
 

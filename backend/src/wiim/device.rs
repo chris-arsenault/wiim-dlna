@@ -51,6 +51,11 @@ pub struct WiimDevice {
     pub udn: String,
     pub device_type: String,
     pub enabled: bool,
+    /// Requested logical output state while WiiM hardware converges. The
+    /// stable `enabled` value does not change until the transition completes.
+    pub output_target: Option<bool>,
+    /// Last bounded output-transition failure, cleared by the next request.
+    pub output_error: Option<String>,
     pub capabilities: DeviceCapabilities,
     pub volume: f64,
     pub muted: bool,
@@ -112,6 +117,8 @@ impl WiimDevice {
             udn: params.udn,
             device_type,
             enabled: true,
+            output_target: None,
+            output_error: None,
             capabilities: params.capabilities,
             volume: 0.0,
             muted: false,

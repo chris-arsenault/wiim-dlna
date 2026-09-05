@@ -9,6 +9,8 @@ pub struct DeviceResponse {
     pub firmware: Option<String>,
     pub device_type: String,
     pub enabled: bool,
+    pub output_target: Option<bool>,
+    pub output_error: Option<String>,
     pub capabilities: DeviceCapabilitiesResponse,
     pub volume: f64,
     pub muted: bool,

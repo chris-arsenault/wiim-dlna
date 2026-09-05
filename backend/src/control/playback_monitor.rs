@@ -61,6 +61,18 @@ pub async fn run_playback_monitor(
             }
         }
 
+        // Group transitions can make the stable playback owner report
+        // STOPPED for tens of seconds. Treat that as topology work, not a
+        // track end, or the monitor will advance the global queue by itself.
+        if all_devices
+            .iter()
+            .any(|device| device.output_target.is_some())
+        {
+            last_playback_device = None;
+            last_states.clear();
+            continue;
+        }
+
         let Some(device) = super::outputs::playback_device(&devices) else {
             last_playback_device = None;
             last_states.clear();

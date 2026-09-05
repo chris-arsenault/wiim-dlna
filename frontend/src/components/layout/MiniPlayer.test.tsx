@@ -31,6 +31,8 @@ describe("MiniPlayer", () => {
           firmware: "4.8.1",
           device_type: "wiim",
           enabled: true,
+          output_target: null,
+          output_error: null,
           capabilities: {
             av_transport: true,
             rendering_control: true,

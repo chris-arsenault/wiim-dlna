@@ -4,6 +4,7 @@ import { useDeviceStore } from "../../stores/deviceStore";
 
 export function DeviceManager() {
   const devices = useDeviceStore((state) => state.devices);
+  const transitionActive = devices.some((device) => device.output_target != null);
 
   if (devices.length === 0) {
     return (
@@ -29,30 +30,32 @@ export function DeviceManager() {
       </div>
       <div className="space-y-2">
         {devices.map((device) => (
-          <OutputToggle key={device.id} device={device} />
+          <OutputToggle key={device.id} device={device} transitionActive={transitionActive} />
         ))}
       </div>
     </div>
   );
 }
 
-function OutputToggle({ device }: { device: Device }) {
+function OutputToggle({ device, transitionActive }: { device: Device; transitionActive: boolean }) {
   const updateDevice = useDeviceStore((state) => state.updateDevice);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [requestPending, setRequestPending] = useState(false);
+  const displayedEnabled = device.output_target ?? device.enabled;
+  const status = outputStatus(device);
 
   const handleToggle = async () => {
-    if (pending) return;
+    if (requestPending || transitionActive) return;
     const enabled = !device.enabled;
-    setPending(true);
-    setError(null);
+    setRequestPending(true);
     try {
       await api.setEnabled(device.id, enabled);
-      updateDevice(device.id, { enabled });
+      updateDevice(device.id, { output_target: enabled, output_error: null });
     } catch {
-      setError(`Could not turn ${device.name} ${enabled ? "on" : "off"}`);
+      updateDevice(device.id, {
+        output_error: `Could not start turning ${device.name} ${enabled ? "on" : "off"}`,
+      });
     } finally {
-      setPending(false);
+      setRequestPending(false);
     }
   };
 
@@ -65,30 +68,42 @@ function OutputToggle({ device }: { device: Device }) {
             {device.model ?? device.ip}
           </div>
         </div>
-        <span
-          className={`text-xs ${device.enabled ? "text-emerald-400" : "text-[var(--color-text-secondary)]"}`}
-        >
-          {device.enabled ? "On" : "Off"}
-        </span>
+        <span className={`text-xs ${outputStatusColor(displayedEnabled)}`}>{status}</span>
         <button
           type="button"
           role="switch"
-          aria-checked={device.enabled}
+          aria-checked={displayedEnabled}
           aria-label={`${device.name} output`}
-          disabled={pending}
+          disabled={requestPending || transitionActive}
           onClick={handleToggle}
-          className={`w-11 h-6 rounded-full transition-colors relative disabled:opacity-50 ${
-            device.enabled ? "bg-[var(--color-accent)]" : "bg-white/15"
-          }`}
+          className={`w-11 h-6 rounded-full transition-colors relative disabled:opacity-50 ${outputTrackColor(displayedEnabled)}`}
         >
           <span
-            className={`w-4 h-4 rounded-full bg-white absolute top-1 transition-all ${
-              device.enabled ? "left-[22px]" : "left-[4px]"
-            }`}
+            className={`w-4 h-4 rounded-full bg-white absolute top-1 transition-all ${outputThumbPosition(displayedEnabled)}`}
           />
         </button>
       </div>
-      {error && <div className="text-xs text-red-400 mt-2">{error}</div>}
+      {device.output_error && (
+        <div className="text-xs text-red-400 mt-2">{device.output_error}</div>
+      )}
     </div>
   );
+}
+
+function outputStatus(device: Device): string {
+  if (device.output_target === true) return "Turning on…";
+  if (device.output_target === false) return "Turning off…";
+  return device.enabled ? "On" : "Off";
+}
+
+function outputStatusColor(enabled: boolean): string {
+  return enabled ? "text-emerald-400" : "text-[var(--color-text-secondary)]";
+}
+
+function outputTrackColor(enabled: boolean): string {
+  return enabled ? "bg-[var(--color-accent)]" : "bg-white/15";
+}
+
+function outputThumbPosition(enabled: boolean): string {
+  return enabled ? "left-[22px]" : "left-[4px]";
 }

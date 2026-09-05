@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { api } from "../api/client";
+import { useDeviceStore } from "../stores/deviceStore";
 import { usePlayerStore } from "../stores/playerStore";
 
 const POLL_INTERVAL = 2000;
@@ -9,6 +10,9 @@ export function usePlaybackPolling() {
 
   useEffect(() => {
     const poll = async () => {
+      if (useDeviceStore.getState().devices.some((device) => device.output_target != null)) {
+        return;
+      }
       try {
         const state = await api.getPlaybackState();
         const session = state.session ?? null;

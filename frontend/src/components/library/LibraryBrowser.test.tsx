@@ -13,6 +13,8 @@ const TEST_DEVICE = {
   firmware: null,
   device_type: "wiim",
   enabled: true,
+  output_target: null,
+  output_error: null,
   capabilities: {
     av_transport: true,
     rendering_control: true,

@@ -19,6 +19,9 @@ fn playlist_source_id(source_id: &str) -> Option<i64> {
 }
 
 fn resolve_playback_device(state: &ControlState) -> Result<WiimDevice, StatusCode> {
+    if super::outputs::transition_active(&state.devices) {
+        return Err(StatusCode::CONFLICT);
+    }
     super::outputs::playback_device(&state.devices).ok_or(StatusCode::CONFLICT)
 }
 

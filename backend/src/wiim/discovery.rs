@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -8,6 +8,13 @@ use super::collector::{CollectorClient, CollectorDevice};
 use super::device::{DeviceCapabilities, DeviceManager, DeviceParams, ServiceUrls, WiimDevice};
 use crate::control::events::EventBus;
 use crate::control::state::ControlState;
+
+const DEVICE_REMOVAL_MISSES: u8 = 4;
+
+struct RegistrationTopology {
+    forced_master_id: Option<String>,
+    refresh: bool,
+}
 
 fn proxy_service_urls(device: &CollectorDevice) -> ServiceUrls {
     let prefix = format!("/wiim/{}/upnp", device.id);
@@ -69,7 +76,7 @@ fn resolve_master_id(
 
 async fn register_device(
     record: CollectorDevice,
-    forced_master_id: Option<String>,
+    topology: RegistrationTopology,
     collector: &CollectorClient,
     device_manager: &DeviceManager,
     persisted: &std::collections::HashMap<String, crate::control::device_config::DeviceConfig>,
@@ -78,14 +85,18 @@ async fn register_device(
     if !record.reachable || !is_wiim_record(&record) {
         return None;
     }
+    let RegistrationTopology {
+        forced_master_id,
+        refresh,
+    } = topology;
     let id = record.id.clone();
     if device_manager.contains(&id) {
-        if let Some(master_id) = forced_master_id {
+        if let Some(master_id) = forced_master_id.filter(|_| refresh) {
             device_manager.update(&id, |device| {
                 device.group_id = Some(master_id);
                 device.is_master = false;
             });
-        } else {
+        } else if refresh {
             refresh_group_state(&id, device_manager, events).await;
         }
         return Some(id);
@@ -168,7 +179,7 @@ async fn register_device(
             }
         }
     }
-    if let Some(master_id) = forced_master_id {
+    if let Some(master_id) = forced_master_id.filter(|_| refresh) {
         device.group_id = Some(master_id);
         device.is_master = false;
     }
@@ -204,6 +215,7 @@ async fn register_device(
 pub async fn run_discovery(state: ControlState, collector: CollectorClient, interval: Duration) {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let mut known_ids = HashSet::new();
+    let mut missing_cycles = HashMap::new();
 
     loop {
         let persisted = state.device_config.load_all();
@@ -218,10 +230,14 @@ pub async fn run_discovery(state: ControlState, collector: CollectorClient, inte
         };
         state.collector_ready.store(true, Ordering::Relaxed);
         let mut current_ids = HashSet::new();
+        let transition_active = crate::control::outputs::transition_active(&state.devices);
         for record in records {
             if let Some(id) = register_device(
                 record,
-                None,
+                RegistrationTopology {
+                    forced_master_id: None,
+                    refresh: !transition_active,
+                },
                 &collector,
                 &state.devices,
                 &persisted,
@@ -268,7 +284,10 @@ pub async fn run_discovery(state: ControlState, collector: CollectorClient, inte
                     Ok(record) => {
                         if let Some(id) = register_device(
                             record,
-                            Some(master.id.clone()),
+                            RegistrationTopology {
+                                forced_master_id: Some(master.id.clone()),
+                                refresh: !transition_active,
+                            },
                             &collector,
                             &state.devices,
                             &persisted,
@@ -286,19 +305,49 @@ pub async fn run_discovery(state: ControlState, collector: CollectorClient, inte
             }
         }
 
-        for id in known_ids.difference(&current_ids) {
+        let removed_ids = track_missing_devices(
+            &known_ids,
+            &current_ids,
+            &mut missing_cycles,
+            transition_active,
+        );
+        for id in &removed_ids {
             info!("Device no longer reachable through collector: {id}");
             state.devices.remove(id);
+            missing_cycles.remove(id);
             state
                 .events
                 .publish("device_removed", &serde_json::json!({ "id": id }));
         }
-        known_ids = current_ids;
-        if let Err(status) = crate::control::outputs::reconcile_outputs(&state).await {
-            warn!("Failed to reconcile playing outputs: HTTP {status}");
+        for id in removed_ids {
+            known_ids.remove(&id);
         }
+        known_ids.extend(current_ids);
         tokio::time::sleep(interval).await;
     }
+}
+
+fn track_missing_devices(
+    known_ids: &HashSet<String>,
+    current_ids: &HashSet<String>,
+    missing_cycles: &mut HashMap<String, u8>,
+    transition_active: bool,
+) -> Vec<String> {
+    for id in current_ids {
+        missing_cycles.remove(id);
+    }
+    if transition_active {
+        return Vec::new();
+    }
+
+    known_ids
+        .difference(current_ids)
+        .filter_map(|id| {
+            let misses = missing_cycles.entry(id.clone()).or_default();
+            *misses = misses.saturating_add(1);
+            (*misses >= DEVICE_REMOVAL_MISSES).then(|| id.clone())
+        })
+        .collect()
 }
 
 fn is_wiim_record(record: &CollectorDevice) -> bool {
@@ -358,6 +407,8 @@ fn publish_devices(device_manager: &DeviceManager, events: &EventBus) {
                 "firmware": device.firmware,
                 "device_type": device.device_type,
                 "enabled": device.enabled,
+                "output_target": device.output_target,
+                "output_error": device.output_error,
                 "capabilities": device.capabilities,
                 "volume": device.volume,
                 "muted": device.muted,
@@ -436,5 +487,40 @@ mod tests {
         assert!(!is_wiim_record(&device));
         device.services.play_queue = Some("/upnp/control/PlayQueue1".into());
         assert!(is_wiim_record(&device));
+    }
+
+    #[test]
+    fn one_inventory_miss_does_not_remove_a_device() {
+        let known = HashSet::from(["speaker".to_string()]);
+        let current = HashSet::new();
+        let mut misses = HashMap::new();
+
+        assert!(track_missing_devices(&known, &current, &mut misses, false).is_empty());
+        assert_eq!(misses.get("speaker"), Some(&1));
+    }
+
+    #[test]
+    fn four_inventory_misses_remove_a_device() {
+        let known = HashSet::from(["speaker".to_string()]);
+        let current = HashSet::new();
+        let mut misses = HashMap::new();
+
+        for _ in 0..DEVICE_REMOVAL_MISSES - 1 {
+            assert!(track_missing_devices(&known, &current, &mut misses, false).is_empty());
+        }
+        assert_eq!(
+            track_missing_devices(&known, &current, &mut misses, false),
+            vec!["speaker"]
+        );
+    }
+
+    #[test]
+    fn active_transition_pauses_inventory_miss_counting() {
+        let known = HashSet::from(["speaker".to_string()]);
+        let current = HashSet::new();
+        let mut misses = HashMap::from([("speaker".to_string(), 2)]);
+
+        assert!(track_missing_devices(&known, &current, &mut misses, true).is_empty());
+        assert_eq!(misses.get("speaker"), Some(&2));
     }
 }

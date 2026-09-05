@@ -223,8 +223,13 @@ known idiosyncrasies.
 The control API exposes one logical playback target, `playing`, with one queue,
 session, timer, and library-navigation state. Only WiiMs enter the device
 registry. Airwave persists each WiiM's desired on/off output membership,
-reconciles every enabled WiiM into one physical group, and detaches and stops
-disabled WiiMs without changing their power, mute, or volume settings.
+forms one physical group from the enabled WiiMs, and detaches and stops disabled
+WiiMs without changing their power, mute, or volume settings. Output changes
+run as serialized background transitions: each Linkplay command is sent once,
+hardware convergence must match twice five seconds apart within a 90-second
+phase, and routine follower joins do not reload the playing URI. Only moving
+playback away from a disabled group master transfers the URI and position to a
+new master.
 
 ## Protocol References
 

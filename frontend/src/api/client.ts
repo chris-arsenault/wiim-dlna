@@ -203,6 +203,8 @@ export interface Device {
   firmware: string | null;
   device_type: string;
   enabled: boolean;
+  output_target: boolean | null;
+  output_error: string | null;
   capabilities: DeviceCapabilities;
   volume: number;
   muted: boolean;

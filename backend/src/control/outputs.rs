@@ -1,21 +1,133 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use tracing::{debug, error, info, warn};
+use thiserror::Error;
+use tokio::sync::OwnedMutexGuard;
+use tracing::{info, warn};
 
 use crate::wiim::device::{DeviceManager, WiimDevice};
 
 use super::models::SetEnabledRequest;
 use super::state::ControlState;
 
-#[derive(Debug)]
+const TOPOLOGY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const TOPOLOGY_PHASE_TIMEOUT: Duration = Duration::from_secs(90);
+const TOPOLOGY_STABLE_SAMPLES: u8 = 2;
+
+#[derive(Debug, Clone)]
 struct PlaybackSnapshot {
     uri: String,
     position: String,
     playing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PhysicalRole {
+    Standalone,
+    Master,
+    Follower(String),
+}
+
+#[derive(Debug, Clone)]
+struct PhysicalTopology {
+    roles: HashMap<String, PhysicalRole>,
+    followers_by_master: HashMap<String, HashSet<String>>,
+}
+
+#[derive(Debug, Default)]
+struct ConvergenceTracker {
+    consecutive_matches: u8,
+}
+
+impl ConvergenceTracker {
+    fn observe(&mut self, matches: bool) -> bool {
+        if matches {
+            self.consecutive_matches = self.consecutive_matches.saturating_add(1);
+        } else {
+            self.consecutive_matches = 0;
+        }
+        self.consecutive_matches >= TOPOLOGY_STABLE_SAMPLES
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_matches = 0;
+    }
+}
+
+impl PhysicalTopology {
+    fn role(&self, device_id: &str) -> Option<&PhysicalRole> {
+        self.roles.get(device_id)
+    }
+
+    fn group_members(&self, master_id: &str) -> Vec<String> {
+        let mut members = self
+            .followers_by_master
+            .get(master_id)
+            .cloned()
+            .unwrap_or_default();
+        members.insert(master_id.to_string());
+        members.extend(
+            self.roles
+                .iter()
+                .filter(|(_, role)| {
+                    matches!(role, PhysicalRole::Follower(master) if master == master_id)
+                })
+                .map(|(id, _)| id.clone()),
+        );
+        members.into_iter().collect()
+    }
+
+    fn fully_joined(&self, follower_id: &str, master_id: &str) -> bool {
+        matches!(
+            self.role(follower_id),
+            Some(PhysicalRole::Follower(id)) if id == master_id
+        ) && self
+            .followers_by_master
+            .get(master_id)
+            .is_some_and(|followers| followers.contains(follower_id))
+    }
+
+    fn fully_standalone(&self, device_id: &str) -> bool {
+        matches!(self.role(device_id), Some(PhysicalRole::Standalone))
+            && !self
+                .followers_by_master
+                .values()
+                .any(|followers| followers.contains(device_id))
+    }
+
+    fn expected_group(&self, enabled_ids: &[String], master_id: &str) -> bool {
+        enabled_ids.iter().all(|id| {
+            if id == master_id {
+                matches!(self.role(id), Some(PhysicalRole::Master))
+            } else {
+                self.fully_joined(id, master_id)
+            }
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+enum TransitionError {
+    #[error("speaker {0} is no longer available")]
+    DeviceUnavailable(String),
+    #[error("could not read topology from {device}: {message}")]
+    TopologyRead { device: String, message: String },
+    #[error("cannot group {0} because its Linkplay control API is unavailable")]
+    LinkplayUnavailable(String),
+    #[error("could not join {device} to the playing group: {message}")]
+    Join { device: String, message: String },
+    #[error("could not detach {device} from the playing group: {message}")]
+    Detach { device: String, message: String },
+    #[error("timed out waiting for WiiM hardware to {0}")]
+    Timeout(String),
+    #[error("could not stop {device}: {message}")]
+    Stop { device: String, message: String },
+    #[error("could not move playback to {device}: {message}")]
+    Restore { device: String, message: String },
 }
 
 /// The physical WiiM that owns the one logical Airwave playback stream.
@@ -43,12 +155,14 @@ pub fn playback_device(devices: &DeviceManager) -> Option<WiimDevice> {
         .or_else(|| enabled.first().cloned())
 }
 
+/// Accept one output change and let a background task observe the slow WiiM
+/// topology transition. The task owns the output lock until convergence or a
+/// bounded timeout, so another click can never queue behind it.
 pub async fn set_output_enabled(
     State(state): State<ControlState>,
     Path(id): Path<String>,
     Json(body): Json<SetEnabledRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let _guard = state.output_lock.lock().await;
     let device = state.devices.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     if device.device_type != "wiim" {
         return Err(StatusCode::NOT_FOUND);
@@ -56,153 +170,502 @@ pub async fn set_output_enabled(
     if body.enabled && !device.capabilities.av_transport {
         return Err(StatusCode::CONFLICT);
     }
-    let current_output = playback_device(&state.devices);
-    let had_output = current_output.is_some();
-    let preferred_master_id = current_output.map(|device| device.id);
-    let snapshot = capture_playback(&state.devices).await;
-    let previous = device.enabled;
-    state
-        .devices
-        .update(&id, |entry| entry.enabled = body.enabled);
-
-    if let Err(status) = reconcile_outputs_locked(
-        &state,
-        snapshot,
-        !had_output && body.enabled,
-        preferred_master_id.as_deref(),
-    )
-    .await
-    {
-        state.devices.update(&id, |entry| entry.enabled = previous);
-        error!(
-            "Failed to change output membership for {} to {}; desired state rolled back",
-            id, body.enabled
-        );
-        return Err(status);
+    if device.output_target.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+    if device.enabled == body.enabled {
+        return Ok(StatusCode::NO_CONTENT);
     }
 
-    state.device_config.save_enabled(&id, body.enabled);
+    let guard = Arc::clone(&state.output_lock)
+        .try_lock_owned()
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let previous_enabled = device.enabled;
+    state.devices.update(&id, |entry| {
+        entry.output_target = Some(body.enabled);
+        entry.output_error = None;
+    });
+    publish_devices_changed(&state);
+
+    let transition_state = state.clone();
+    tokio::spawn(async move {
+        finish_output_transition(transition_state, guard, id, previous_enabled, body.enabled).await;
+    });
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn finish_output_transition(
+    state: ControlState,
+    guard: OwnedMutexGuard<()>,
+    device_id: String,
+    previous_enabled: bool,
+    target_enabled: bool,
+) {
+    let result = run_output_transition(&state, &device_id, target_enabled).await;
+
+    let event_error = match result {
+        Ok(topology) => {
+            apply_physical_topology(&state.devices, &topology);
+            state.devices.update(&device_id, |device| {
+                device.enabled = target_enabled;
+                device.output_target = None;
+                device.output_error = None;
+            });
+            state.device_config.save_enabled(&device_id, target_enabled);
+            info!(
+                "WiiM output transition completed for {}: enabled={}",
+                device_id, target_enabled
+            );
+            None
+        }
+        Err(error) => {
+            if let Ok(topology) = read_physical_topology(&state.devices).await {
+                apply_physical_topology(&state.devices, &topology);
+            }
+            let message = error.to_string();
+            warn!(
+                "WiiM output transition failed for {}: {}",
+                device_id, message
+            );
+            state.devices.update(&device_id, |device| {
+                device.output_target = None;
+                device.output_error = Some(message.clone());
+            });
+            Some(message)
+        }
+    };
+
+    // Make the next request admissible before publishing the non-pending
+    // state. A fast client cannot observe an idle UI while the lock is held.
+    drop(guard);
+    let succeeded = event_error.is_none();
     state.events.publish(
         "device_state",
-        &serde_json::json!({ "device_id": id, "enabled": body.enabled }),
+        &serde_json::json!({
+            "device_id": device_id,
+            "enabled": if succeeded { target_enabled } else { previous_enabled },
+            "output_target": null,
+            "output_error": event_error,
+        }),
     );
-    if had_output && playback_device(&state.devices).is_none() {
+    if succeeded && previous_enabled && !target_enabled && playback_device(&state.devices).is_none()
+    {
         state.events.publish(
             "playback_stopped",
             &serde_json::json!({ "target_id": super::state::PLAYBACK_TARGET_ID }),
         );
     }
     publish_devices_changed(&state);
-    Ok(StatusCode::OK)
 }
 
-/// Reconcile persisted output membership with the actual WiiM group topology.
-/// Discovery calls this after it has refreshed the devices' physical group state.
-pub async fn reconcile_outputs(state: &ControlState) -> Result<(), StatusCode> {
-    let _guard = state.output_lock.lock().await;
-    let preferred_master_id = playback_device(&state.devices).map(|device| device.id);
-    let snapshot = capture_playback(&state.devices).await;
-    reconcile_outputs_locked(state, snapshot, false, preferred_master_id.as_deref()).await
-}
-
-async fn reconcile_outputs_locked(
+async fn run_output_transition(
     state: &ControlState,
-    mut snapshot: Option<PlaybackSnapshot>,
-    restore_global_stream: bool,
-    preferred_master_id: Option<&str>,
-) -> Result<(), StatusCode> {
-    let mut devices = state
+    device_id: &str,
+    target_enabled: bool,
+) -> Result<PhysicalTopology, TransitionError> {
+    let initial = read_physical_topology(&state.devices).await?;
+    let current_master_id = playback_device(&state.devices).map(|device| device.id);
+
+    if target_enabled {
+        enable_output(state, device_id, &initial, current_master_id.as_deref()).await
+    } else {
+        disable_output(state, device_id, &initial, current_master_id.as_deref()).await
+    }
+}
+
+async fn enable_output(
+    state: &ControlState,
+    device_id: &str,
+    initial: &PhysicalTopology,
+    current_master_id: Option<&str>,
+) -> Result<PhysicalTopology, TransitionError> {
+    let mut topology = initial.clone();
+    let already_joined = current_master_id.is_some_and(|master_id| {
+        matches!(
+            topology.role(device_id),
+            Some(PhysicalRole::Follower(id)) if id == master_id
+        )
+    });
+    if !already_joined && !matches!(topology.role(device_id), Some(PhysicalRole::Standalone)) {
+        topology = detach_device_once(state, device_id, &topology).await?;
+    }
+
+    if let Some(master_id) = current_master_id {
+        if master_id != device_id && already_joined {
+            topology = wait_for_topology(
+                &state.devices,
+                &format!("confirm {device_id} is joined to {master_id}"),
+                |observed| observed.fully_joined(device_id, master_id),
+            )
+            .await?;
+        } else if master_id != device_id {
+            send_join_once(state, device_id, master_id).await?;
+            topology = wait_for_topology(
+                &state.devices,
+                &format!("join {device_id} to {master_id}"),
+                |observed| observed.fully_joined(device_id, master_id),
+            )
+            .await?;
+        }
+    } else if let Some(snapshot) = global_playback_snapshot(state) {
+        let output = state
+            .devices
+            .get(device_id)
+            .ok_or_else(|| TransitionError::DeviceUnavailable(device_id.to_string()))?;
+        restore_playback(&output, snapshot).await?;
+    }
+
+    Ok(topology)
+}
+
+async fn disable_output(
+    state: &ControlState,
+    device_id: &str,
+    initial: &PhysicalTopology,
+    current_master_id: Option<&str>,
+) -> Result<PhysicalTopology, TransitionError> {
+    let remaining = enabled_ids_except(&state.devices, device_id);
+    let moving_master = current_master_id == Some(device_id) && !remaining.is_empty();
+    let snapshot = if moving_master {
+        capture_playback(&state.devices).await
+    } else {
+        None
+    };
+
+    let topology = detach_device_once(state, device_id, initial).await?;
+    let output = state
         .devices
+        .get(device_id)
+        .ok_or_else(|| TransitionError::DeviceUnavailable(device_id.to_string()))?;
+    stop_transport(&output).await?;
+
+    if !moving_master {
+        return Ok(topology);
+    }
+
+    let new_master_id = remaining
+        .first()
+        .cloned()
+        .ok_or_else(|| TransitionError::DeviceUnavailable(device_id.to_string()))?;
+    let mut topology = topology;
+
+    for follower_id in remaining.iter().filter(|id| **id != new_master_id) {
+        if !matches!(topology.role(follower_id), Some(PhysicalRole::Standalone)) {
+            topology = detach_device_once(state, follower_id, &topology).await?;
+        }
+    }
+
+    if remaining.len() > 1 {
+        for follower_id in remaining.iter().filter(|id| **id != new_master_id) {
+            send_join_once(state, follower_id, &new_master_id).await?;
+        }
+        topology = wait_for_topology(
+            &state.devices,
+            &format!("form the playing group around {new_master_id}"),
+            |observed| observed.expected_group(&remaining, &new_master_id),
+        )
+        .await?;
+    }
+
+    if let Some(snapshot) = snapshot {
+        let new_master = state
+            .devices
+            .get(&new_master_id)
+            .ok_or_else(|| TransitionError::DeviceUnavailable(new_master_id.clone()))?;
+        restore_playback(&new_master, snapshot).await?;
+    }
+
+    Ok(topology)
+}
+
+fn enabled_ids_except(devices: &DeviceManager, excluded_id: &str) -> Vec<String> {
+    let mut ids = devices
         .list_all()
         .into_iter()
-        .filter(|device| device.device_type == "wiim")
+        .filter(|device| {
+            device.id != excluded_id
+                && device.enabled
+                && device.device_type == "wiim"
+                && device.capabilities.av_transport
+        })
+        .map(|device| device.id)
         .collect::<Vec<_>>();
-    devices.sort_by(|a, b| a.id.cmp(&b.id));
+    ids.sort();
+    ids
+}
 
-    let enabled = devices
-        .iter()
-        .filter(|device| device.enabled && device.capabilities.av_transport)
+async fn detach_device_once(
+    state: &ControlState,
+    device_id: &str,
+    topology: &PhysicalTopology,
+) -> Result<PhysicalTopology, TransitionError> {
+    let role = topology
+        .role(device_id)
         .cloned()
-        .collect::<Vec<_>>();
-    let desired_master_id = select_master_id(&enabled, preferred_master_id);
-    let mut restore_required = false;
-
-    // Remove obsolete groups first. This also handles a disabled former master
-    // and arbitrary legacy groups that do not match the one playing group.
-    let physical_masters = devices
-        .iter()
-        .filter(|device| device.is_master)
-        .map(|device| device.id.clone())
-        .collect::<HashSet<_>>();
-    for master_id in physical_masters {
-        let keep = desired_master_id.as_deref() == Some(master_id.as_str()) && enabled.len() > 1;
-        if !keep {
-            dissolve_physical_group(state, &master_id).await?;
-            restore_required = true;
+        .ok_or_else(|| TransitionError::DeviceUnavailable(device_id.to_string()))?;
+    let affected_ids = match role {
+        PhysicalRole::Standalone => return Ok(topology.clone()),
+        PhysicalRole::Follower(master_id) => {
+            send_kick_once(state, device_id, &master_id).await?;
+            vec![device_id.to_string()]
         }
+        PhysicalRole::Master => {
+            let members = topology.group_members(device_id);
+            send_dissolve_once(state, device_id).await?;
+            members
+        }
+    };
+
+    wait_for_topology(&state.devices, &format!("detach {device_id}"), |observed| {
+        affected_ids.iter().all(|id| observed.fully_standalone(id))
+    })
+    .await
+}
+
+async fn send_join_once(
+    state: &ControlState,
+    follower_id: &str,
+    master_id: &str,
+) -> Result<(), TransitionError> {
+    let follower = state
+        .devices
+        .get(follower_id)
+        .ok_or_else(|| TransitionError::DeviceUnavailable(follower_id.to_string()))?;
+    let master = state
+        .devices
+        .get(master_id)
+        .ok_or_else(|| TransitionError::DeviceUnavailable(master_id.to_string()))?;
+    let https = follower
+        .https_client
+        .as_ref()
+        .ok_or_else(|| TransitionError::LinkplayUnavailable(follower_id.to_string()))?;
+
+    info!(
+        "Sending one join command to {} ({}) for master {} ({})",
+        follower.name, follower.id, master.name, master.id
+    );
+    https
+        .join_group_master(&master.ip)
+        .await
+        .map_err(|error| TransitionError::Join {
+            device: follower_id.to_string(),
+            message: error.to_string(),
+        })
+}
+
+async fn send_kick_once(
+    state: &ControlState,
+    follower_id: &str,
+    master_id: &str,
+) -> Result<(), TransitionError> {
+    let follower = state
+        .devices
+        .get(follower_id)
+        .ok_or_else(|| TransitionError::DeviceUnavailable(follower_id.to_string()))?;
+    let master = state
+        .devices
+        .get(master_id)
+        .ok_or_else(|| TransitionError::DeviceUnavailable(master_id.to_string()))?;
+    let https = master
+        .https_client
+        .as_ref()
+        .ok_or_else(|| TransitionError::LinkplayUnavailable(master_id.to_string()))?;
+
+    info!(
+        "Sending one detach command for {} ({}) from master {} ({})",
+        follower.name, follower.id, master.name, master.id
+    );
+    https
+        .slave_kickout(&follower.ip)
+        .await
+        .map_err(|error| TransitionError::Detach {
+            device: follower_id.to_string(),
+            message: error.to_string(),
+        })
+}
+
+async fn send_dissolve_once(state: &ControlState, master_id: &str) -> Result<(), TransitionError> {
+    let master = state
+        .devices
+        .get(master_id)
+        .ok_or_else(|| TransitionError::DeviceUnavailable(master_id.to_string()))?;
+    let https = master
+        .https_client
+        .as_ref()
+        .ok_or_else(|| TransitionError::LinkplayUnavailable(master_id.to_string()))?;
+    let slaves = https
+        .get_slave_list()
+        .await
+        .map_err(|error| TransitionError::Detach {
+            device: master_id.to_string(),
+            message: error.to_string(),
+        })?;
+
+    info!(
+        "Sending one detach command per follower in group led by {} ({})",
+        master.name, master.id
+    );
+    for slave in slaves.slave_list {
+        https
+            .slave_kickout(&slave.ip)
+            .await
+            .map_err(|error| TransitionError::Detach {
+                device: slave.uuid,
+                message: error.to_string(),
+            })?;
     }
+    Ok(())
+}
 
-    // Leave stale or undesired follower relationships without disturbing a
-    // valid playing master.
-    for device in state.devices.list_all() {
-        if device.device_type != "wiim" || device.group_id.is_none() || device.is_master {
-            continue;
-        }
-        let in_playing_group = device.enabled
-            && desired_master_id.as_deref() == device.group_id.as_deref()
-            && enabled.len() > 1;
-        if !in_playing_group {
-            leave_group(state, &device).await?;
-        }
-    }
-
-    if let Some(master_id) = desired_master_id.as_deref() {
-        if enabled.len() > 1 {
-            for device in &enabled {
-                if device.id == master_id {
-                    continue;
-                }
-                let current = state.devices.get(&device.id).ok_or(StatusCode::NOT_FOUND)?;
-                if current.group_id.as_deref() != Some(master_id) || current.is_master {
-                    join_group(state, master_id, &current).await?;
-                    restore_required = true;
+async fn wait_for_topology<F>(
+    devices: &DeviceManager,
+    description: &str,
+    converged: F,
+) -> Result<PhysicalTopology, TransitionError>
+where
+    F: Fn(&PhysicalTopology) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + TOPOLOGY_PHASE_TIMEOUT;
+    let mut stability = ConvergenceTracker::default();
+    loop {
+        match read_physical_topology(devices).await {
+            Ok(topology) => {
+                if stability.observe(converged(&topology)) {
+                    return Ok(topology);
                 }
             }
-            state.devices.update(master_id, |device| {
-                device.group_id = Some(master_id.to_string());
-                device.is_master = true;
-            });
-        } else {
-            state.devices.update(master_id, |device| {
-                device.group_id = None;
-                device.is_master = false;
-            });
+            Err(error) => {
+                stability.reset();
+                warn!("Topology read while waiting to {description}: {error}");
+            }
         }
-    }
 
-    // A disabled output must have no active software transport. This is the
-    // silence boundary: it does not change power, mute, or volume.
-    for device in state
-        .devices
+        if tokio::time::Instant::now() >= deadline {
+            return Err(TransitionError::Timeout(description.to_string()));
+        }
+        tokio::time::sleep(TOPOLOGY_POLL_INTERVAL).await;
+    }
+}
+
+async fn read_physical_topology(
+    devices: &DeviceManager,
+) -> Result<PhysicalTopology, TransitionError> {
+    let mut wiims = devices
         .list_all()
         .into_iter()
-        .filter(|device| device.device_type == "wiim" && !device.enabled)
-    {
-        stop_transport(&device).await?;
-    }
+        .filter(|device| {
+            device.device_type == "wiim"
+                && device.capabilities.av_transport
+                && (device.enabled || device.output_target.is_some())
+        })
+        .collect::<Vec<_>>();
+    wiims.sort_by(|left, right| left.id.cmp(&right.id));
+    let known_ids = wiims
+        .iter()
+        .map(|device| device.id.clone())
+        .collect::<Vec<_>>();
+    let mut roles = HashMap::new();
+    let mut followers_by_master = HashMap::new();
 
-    if restore_global_stream && snapshot.is_none() {
-        snapshot = global_playback_snapshot(state);
-        restore_required = snapshot.is_some();
-    }
-
-    if restore_required {
-        if let (Some(snapshot), Some(master)) = (snapshot, playback_device(&state.devices)) {
-            restore_playback(&master, snapshot).await?;
+    for device in wiims {
+        let info = device.av_transport.get_info_ex().await.map_err(|error| {
+            TransitionError::TopologyRead {
+                device: device.id.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        let role = physical_role_from_info(
+            &info.slave_flag,
+            &info.master_uuid,
+            &info.slave_list,
+            &known_ids,
+        );
+        if matches!(role, PhysicalRole::Master) {
+            followers_by_master.insert(
+                device.id.clone(),
+                follower_ids_from_slave_list(&info.slave_list, &known_ids),
+            );
         }
+        roles.insert(device.id, role);
     }
 
-    Ok(())
+    Ok(PhysicalTopology {
+        roles,
+        followers_by_master,
+    })
+}
+
+fn physical_role_from_info(
+    slave_flag: &str,
+    master_uuid: &str,
+    slave_list: &str,
+    known_ids: &[String],
+) -> PhysicalRole {
+    if slave_flag == "1" {
+        let master_id = normalize_device_id(master_uuid, known_ids);
+        return PhysicalRole::Follower(master_id);
+    }
+
+    let slave_count = serde_json::from_str::<serde_json::Value>(slave_list)
+        .ok()
+        .and_then(|value| {
+            value.get("slaves").and_then(|count| {
+                count
+                    .as_u64()
+                    .or_else(|| count.as_str().and_then(|text| text.parse().ok()))
+            })
+        })
+        .unwrap_or(0);
+    if slave_count > 0 {
+        PhysicalRole::Master
+    } else {
+        PhysicalRole::Standalone
+    }
+}
+
+fn follower_ids_from_slave_list(slave_list: &str, known_ids: &[String]) -> HashSet<String> {
+    serde_json::from_str::<serde_json::Value>(slave_list)
+        .ok()
+        .and_then(|value| value.get("slave_list").cloned())
+        .and_then(|followers| followers.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|follower| {
+            follower
+                .get("uuid")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| normalize_device_id(id, known_ids))
+        })
+        .collect()
+}
+
+fn normalize_device_id(id: &str, known_ids: &[String]) -> String {
+    let normalized = id.trim().trim_start_matches("uuid:");
+    known_ids
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(normalized))
+        .cloned()
+        .unwrap_or_else(|| normalized.to_string())
+}
+
+fn apply_physical_topology(devices: &DeviceManager, topology: &PhysicalTopology) {
+    for (device_id, role) in &topology.roles {
+        devices.update(device_id, |device| match role {
+            PhysicalRole::Standalone => {
+                device.group_id = None;
+                device.is_master = false;
+            }
+            PhysicalRole::Master => {
+                device.group_id = Some(device_id.clone());
+                device.is_master = true;
+            }
+            PhysicalRole::Follower(master_id) => {
+                device.group_id = Some(master_id.clone());
+                device.is_master = false;
+            }
+        });
+    }
 }
 
 /// Reconnect the singleton's current track after its first output is enabled.
@@ -237,20 +700,6 @@ fn global_playback_snapshot(state: &ControlState) -> Option<PlaybackSnapshot> {
         position: "00:00:00".to_string(),
         playing: false,
     })
-}
-
-fn select_master_id(enabled: &[WiimDevice], preferred_master_id: Option<&str>) -> Option<String> {
-    enabled
-        .iter()
-        .find(|device| preferred_master_id == Some(device.id.as_str()))
-        .or_else(|| {
-            enabled
-                .iter()
-                .find(|device| device.is_master && device.group_id.as_deref() == Some(&device.id))
-        })
-        .or_else(|| enabled.iter().find(|device| device.group_id.is_none()))
-        .or_else(|| enabled.first())
-        .map(|device| device.id.clone())
 }
 
 async fn capture_playback(devices: &DeviceManager) -> Option<PlaybackSnapshot> {
@@ -299,132 +748,7 @@ async fn capture_playback(devices: &DeviceManager) -> Option<PlaybackSnapshot> {
     paused_snapshot
 }
 
-async fn join_group(
-    state: &ControlState,
-    master_id: &str,
-    follower: &WiimDevice,
-) -> Result<(), StatusCode> {
-    let master = state.devices.get(master_id).ok_or(StatusCode::NOT_FOUND)?;
-    info!(
-        "Joining output {} ({}) to playing master {} ({})",
-        follower.name, follower.id, master.name, master.id
-    );
-
-    if let Some(https) = &follower.https_client {
-        https.join_group_master(&master.ip).await.map_err(|error| {
-            warn!("JoinGroupMaster failed for {}: {error:?}", follower.id);
-            StatusCode::BAD_GATEWAY
-        })?;
-    } else {
-        let master_info = format!("{}:{}", master.ip, master.port);
-        follower
-            .rendering
-            .multiroom_join_group(&master_info)
-            .await
-            .map_err(|error| {
-                warn!("MultiRoomJoinGroup failed for {}: {error:?}", follower.id);
-                StatusCode::BAD_GATEWAY
-            })?;
-    }
-
-    state.devices.update(&follower.id, |device| {
-        device.group_id = Some(master_id.to_string());
-        device.is_master = false;
-    });
-    Ok(())
-}
-
-async fn leave_group(state: &ControlState, follower: &WiimDevice) -> Result<(), StatusCode> {
-    debug!(
-        "Detaching output {} ({}) from group {:?}",
-        follower.name, follower.id, follower.group_id
-    );
-    let used_master_api = if let Some(master_id) = follower.group_id.as_deref() {
-        if let Some(master) = state.devices.get(master_id) {
-            if let Some(https) = &master.https_client {
-                https.slave_kickout(&follower.ip).await.map_err(|error| {
-                    warn!("SlaveKickout failed for {}: {error:?}", follower.id);
-                    StatusCode::BAD_GATEWAY
-                })?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if !used_master_api {
-        follower
-            .rendering
-            .multiroom_leave_group()
-            .await
-            .map_err(|error| {
-                warn!("MultiRoomLeaveGroup failed for {}: {error:?}", follower.id);
-                StatusCode::BAD_GATEWAY
-            })?;
-    }
-
-    state.devices.update(&follower.id, |device| {
-        device.group_id = None;
-        device.is_master = false;
-    });
-    Ok(())
-}
-
-async fn dissolve_physical_group(state: &ControlState, master_id: &str) -> Result<(), StatusCode> {
-    let master = state.devices.get(master_id).ok_or(StatusCode::NOT_FOUND)?;
-    info!(
-        "Dissolving obsolete output group led by {} ({})",
-        master.name, master.id
-    );
-
-    if let Some(https) = &master.https_client {
-        let slaves = https.get_slave_list().await.map_err(|error| {
-            warn!("Failed to read slave list for {}: {error:?}", master.id);
-            StatusCode::BAD_GATEWAY
-        })?;
-        for slave in slaves.slave_list {
-            https.slave_kickout(&slave.ip).await.map_err(|error| {
-                warn!("SlaveKickout failed for {}: {error:?}", slave.uuid);
-                StatusCode::BAD_GATEWAY
-            })?;
-            let id = slave.uuid.replace("uuid:", "");
-            state.devices.update(&id, |device| {
-                device.group_id = None;
-                device.is_master = false;
-            });
-        }
-    } else {
-        for follower in state.devices.list_all().into_iter().filter(|device| {
-            device.id != master_id && device.group_id.as_deref() == Some(master_id)
-        }) {
-            follower
-                .rendering
-                .multiroom_leave_group()
-                .await
-                .map_err(|error| {
-                    warn!("MultiRoomLeaveGroup failed for {}: {error:?}", follower.id);
-                    StatusCode::BAD_GATEWAY
-                })?;
-            state.devices.update(&follower.id, |device| {
-                device.group_id = None;
-                device.is_master = false;
-            });
-        }
-    }
-
-    state.devices.update(master_id, |device| {
-        device.group_id = None;
-        device.is_master = false;
-    });
-    Ok(())
-}
-
-async fn stop_transport(device: &WiimDevice) -> Result<(), StatusCode> {
+async fn stop_transport(device: &WiimDevice) -> Result<(), TransitionError> {
     let transport = device.av_transport.get_transport_info().await.ok();
     if transport.as_ref().is_some_and(|state| {
         matches!(
@@ -434,24 +758,27 @@ async fn stop_transport(device: &WiimDevice) -> Result<(), StatusCode> {
     }) {
         return Ok(());
     }
-    device.av_transport.stop().await.map_err(|error| {
-        warn!("Failed to stop disabled output {}: {error:?}", device.id);
-        StatusCode::BAD_GATEWAY
-    })
+    device
+        .av_transport
+        .stop()
+        .await
+        .map_err(|error| TransitionError::Stop {
+            device: device.id.clone(),
+            message: error.to_string(),
+        })
 }
 
 async fn restore_playback(
     master: &WiimDevice,
     snapshot: PlaybackSnapshot,
-) -> Result<(), StatusCode> {
-    tokio::time::sleep(Duration::from_secs(2)).await;
+) -> Result<(), TransitionError> {
     master
         .av_transport
         .set_av_transport_uri(&snapshot.uri, "")
         .await
-        .map_err(|error| {
-            warn!("Failed to restore stream on {}: {error:?}", master.id);
-            StatusCode::BAD_GATEWAY
+        .map_err(|error| TransitionError::Restore {
+            device: master.id.clone(),
+            message: error.to_string(),
         })?;
     if !snapshot.position.is_empty() && snapshot.position != "00:00:00" {
         if let Err(error) = master.av_transport.seek(&snapshot.position).await {
@@ -462,13 +789,27 @@ async fn restore_playback(
         }
     }
     if snapshot.playing {
-        master.av_transport.play().await.map_err(|error| {
-            warn!("Failed to resume stream on {}: {error:?}", master.id);
-            StatusCode::BAD_GATEWAY
-        })?;
+        master
+            .av_transport
+            .play()
+            .await
+            .map_err(|error| TransitionError::Restore {
+                device: master.id.clone(),
+                message: error.to_string(),
+            })?;
     }
-    info!("Restored the playing stream on output master {}", master.id);
+    info!(
+        "Moved the playing stream once to output master {}",
+        master.id
+    );
     Ok(())
+}
+
+pub fn transition_active(devices: &DeviceManager) -> bool {
+    devices
+        .list_all()
+        .iter()
+        .any(|device| device.output_target.is_some())
 }
 
 pub fn publish_devices_changed(state: &ControlState) {
@@ -486,6 +827,8 @@ pub fn publish_devices_changed(state: &ControlState) {
                 "firmware": device.firmware,
                 "device_type": device.device_type,
                 "enabled": device.enabled,
+                "output_target": device.output_target,
+                "output_error": device.output_error,
                 "capabilities": device.capabilities,
                 "volume": device.volume,
                 "muted": device.muted,
@@ -537,25 +880,130 @@ mod tests {
 
     #[test]
     fn current_enabled_master_remains_the_playing_master() {
-        let enabled = vec![
-            device("a", true, Some("a"), true),
-            device("b", true, Some("a"), false),
-        ];
-        assert_eq!(select_master_id(&enabled, None).as_deref(), Some("a"));
+        let devices = DeviceManager::new();
+        devices.register(device("a", true, Some("a"), true));
+        devices.register(device("b", true, Some("a"), false));
+        assert_eq!(
+            playback_device(&devices).map(|device| device.id).as_deref(),
+            Some("a")
+        );
     }
 
     #[test]
-    fn disabled_master_is_not_selected() {
-        let enabled = vec![device("b", true, Some("a"), false)];
-        assert_eq!(select_master_id(&enabled, None).as_deref(), Some("b"));
+    fn pending_target_does_not_change_the_stable_playback_owner() {
+        let devices = DeviceManager::new();
+        let mut master = device("a", true, Some("a"), true);
+        master.output_target = Some(false);
+        devices.register(master);
+        devices.register(device("b", true, Some("a"), false));
+        assert_eq!(
+            playback_device(&devices).map(|device| device.id).as_deref(),
+            Some("a")
+        );
     }
 
     #[test]
-    fn current_standalone_output_remains_master_when_an_output_is_enabled() {
-        let enabled = vec![
-            device("a", true, None, false),
-            device("b", true, None, false),
-        ];
-        assert_eq!(select_master_id(&enabled, Some("b")).as_deref(), Some("b"));
+    fn physical_role_uses_master_uuid_for_a_follower() {
+        let ids = vec!["MASTER".to_string(), "follower".to_string()];
+        assert_eq!(
+            physical_role_from_info("1", "uuid:master", "{}", &ids),
+            PhysicalRole::Follower("MASTER".to_string())
+        );
+    }
+
+    #[test]
+    fn physical_role_uses_slave_count_for_a_master() {
+        assert_eq!(
+            physical_role_from_info("0", "", r#"{"slaves":2}"#, &[]),
+            PhysicalRole::Master
+        );
+    }
+
+    #[test]
+    fn master_slave_list_is_normalized_to_known_device_ids() {
+        let ids = vec!["FOLLOWER".to_string()];
+        let followers = follower_ids_from_slave_list(
+            r#"{"slaves":"1","slave_list":[{"uuid":"uuid:follower"}]}"#,
+            &ids,
+        );
+        assert_eq!(followers, HashSet::from(["FOLLOWER".to_string()]));
+        assert_eq!(
+            physical_role_from_info("0", "", r#"{"slaves":"1"}"#, &ids),
+            PhysicalRole::Master
+        );
+    }
+
+    #[test]
+    fn physical_role_is_standalone_without_group_evidence() {
+        assert_eq!(
+            physical_role_from_info("0", "", "{}", &[]),
+            PhysicalRole::Standalone
+        );
+    }
+
+    #[test]
+    fn group_members_include_master_and_known_followers() {
+        let topology = PhysicalTopology {
+            roles: HashMap::from([
+                ("a".to_string(), PhysicalRole::Master),
+                ("b".to_string(), PhysicalRole::Follower("a".to_string())),
+                ("c".to_string(), PhysicalRole::Standalone),
+            ]),
+            followers_by_master: HashMap::from([(
+                "a".to_string(),
+                HashSet::from(["b".to_string()]),
+            )]),
+        };
+        let mut members = topology.group_members("a");
+        members.sort();
+        assert_eq!(members, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn convergence_requires_master_and_follower_to_agree() {
+        let mut topology = PhysicalTopology {
+            roles: HashMap::from([
+                ("a".to_string(), PhysicalRole::Master),
+                ("b".to_string(), PhysicalRole::Follower("a".to_string())),
+            ]),
+            followers_by_master: HashMap::new(),
+        };
+        assert!(!topology.fully_joined("b", "a"));
+
+        topology
+            .followers_by_master
+            .insert("a".to_string(), HashSet::from(["b".to_string()]));
+        assert!(topology.fully_joined("b", "a"));
+    }
+
+    #[test]
+    fn detach_is_not_complete_while_master_still_lists_follower() {
+        let topology = PhysicalTopology {
+            roles: HashMap::from([
+                ("a".to_string(), PhysicalRole::Master),
+                ("b".to_string(), PhysicalRole::Standalone),
+            ]),
+            followers_by_master: HashMap::from([(
+                "a".to_string(),
+                HashSet::from(["b".to_string()]),
+            )]),
+        };
+        assert!(!topology.fully_standalone("b"));
+    }
+
+    #[test]
+    fn convergence_requires_two_consecutive_matching_samples() {
+        let mut stability = ConvergenceTracker::default();
+        assert!(!stability.observe(true));
+        assert!(stability.observe(true));
+    }
+
+    #[test]
+    fn topology_mismatch_resets_convergence_hysteresis() {
+        let mut stability = ConvergenceTracker::default();
+        assert!(!stability.observe(true));
+        assert!(!stability.observe(false));
+        assert!(!stability.observe(true));
+        assert!(stability.observe(true));
     }
 }

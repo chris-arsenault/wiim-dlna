@@ -21,6 +21,8 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
     firmware: "4.8.1",
     device_type: "wiim",
     enabled: true,
+    output_target: null,
+    output_error: null,
     capabilities: {
       av_transport: true,
       rendering_control: true,
@@ -66,12 +68,37 @@ describe("DeviceManager", () => {
     );
   });
 
-  it("turns a speaker off through output membership and updates after success", async () => {
+  it("starts turning a speaker off without changing its stable state", async () => {
     useDeviceStore.setState({ devices: [makeDevice({ id: "a", name: "Kitchen" })] });
     render(<DeviceManager />);
     fireEvent.click(screen.getByRole("switch", { name: "Kitchen output" }));
     await waitFor(() => expect(mockSetEnabled).toHaveBeenCalledWith("a", false));
-    expect(useDeviceStore.getState().devices[0].enabled).toBe(false);
+    expect(useDeviceStore.getState().devices[0]).toMatchObject({
+      enabled: true,
+      output_target: false,
+    });
+  });
+
+  it("disables every toggle while WiiM hardware is converging", () => {
+    useDeviceStore.setState({
+      devices: [
+        makeDevice({ id: "a", name: "Kitchen", output_target: false }),
+        makeDevice({ id: "b", name: "Bedroom" }),
+      ],
+    });
+    render(<DeviceManager />);
+
+    expect(screen.getByText("Turning off…")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Kitchen output" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Bedroom output" })).toBeDisabled();
+  });
+
+  it("shows a bounded transition failure returned by the server", () => {
+    useDeviceStore.setState({
+      devices: [makeDevice({ output_error: "timed out waiting for WiiM hardware to detach" })],
+    });
+    render(<DeviceManager />);
+    expect(screen.getByText("timed out waiting for WiiM hardware to detach")).toBeInTheDocument();
   });
 
   it("does not expose grouping, presets, mute, or volume controls", () => {
