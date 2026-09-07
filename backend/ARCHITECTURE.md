@@ -224,12 +224,29 @@ The control API exposes one logical playback target, `playing`, with one queue,
 session, timer, and library-navigation state. Only WiiMs enter the device
 registry. Airwave persists each WiiM's desired on/off output membership,
 forms one physical group from the enabled WiiMs, and detaches and stops disabled
-WiiMs without changing their power, mute, or volume settings. Output changes
-run as serialized background transitions: each Linkplay command is sent once,
-hardware convergence must match twice five seconds apart within a 90-second
-phase, and routine follower joins do not reload the playing URI. Only moving
-playback away from a disabled group master transfers the URI and position to a
-new master.
+WiiMs without changing their power or mute settings. Each WiiM also has a
+persisted base level. The main player's persisted volume is a global multiplier,
+so the physical level is `base level × main volume` and relative speaker balance
+survives main-volume changes. Airwave writes effective levels through each
+device's direct Linkplay API; it never uses group-propagating SOAP volume writes.
+An output receives its effective level before it joins the playing group. Output
+changes run as serialized background transitions: desired membership is
+persisted immediately, each Linkplay command is sent once, and hardware
+convergence must match twice five seconds apart within a 90-second phase.
+Routine follower joins do not reload the playing URI. Only moving playback away
+from a disabled group master transfers the URI and position to a new master.
+
+A failed direct transition escalates once to a different operation: reset every
+present WiiM to standalone, software-stop desired-off outputs, and rebuild the
+whole desired group. A second failure persists a global recovery-required latch.
+Discovery and timers do not retry it, playback commands are rejected while the
+topology is indeterminate, and Airwave makes one best-effort software stop on
+every WiiM so an inseparable unwanted output cannot continue making noise.
+Toggle changes then only edit desired membership. The
+`POST /api/outputs/recover` action starts one new recovery epoch explicitly;
+`GET /api/outputs` and `output_state_changed` expose its state to the frontend.
+Every nonmatching topology sample is logged with the observed roles so a later
+timeout identifies the exact disagreement.
 
 ## Protocol References
 

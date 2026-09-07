@@ -15,6 +15,9 @@ vi.mock("./config", () => ({
 vi.mock("./api/client", () => ({
   api: {
     getDevices: vi.fn(() => Promise.resolve([])),
+    getOutputState: vi.fn(() =>
+      Promise.resolve({ required: false, in_progress: false, error: null })
+    ),
     browse: vi.fn(() => Promise.resolve({ items: [], total: 0 })),
     getQueue: vi.fn(() => Promise.resolve({ tracks: [], position: 0 })),
     pause: vi.fn(() => Promise.resolve()),
@@ -57,7 +60,11 @@ vi.mock("framer-motion", () => ({
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useDeviceStore.setState({ devices: [], settingsDeviceId: null });
+    useDeviceStore.setState({
+      devices: [],
+      outputRecovery: { required: false, in_progress: false, error: null },
+      settingsDeviceId: null,
+    });
     usePlayerStore.setState({ playing: false, currentTrack: null, session: null });
     useUiStore.setState({ drawer: null });
   });

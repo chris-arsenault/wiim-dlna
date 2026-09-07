@@ -33,12 +33,17 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
 
 describe("deviceStore", () => {
   beforeEach(() => {
-    useDeviceStore.setState({ devices: [], settingsDeviceId: null });
+    useDeviceStore.setState({
+      devices: [],
+      outputRecovery: { required: false, in_progress: false, error: null },
+      settingsDeviceId: null,
+    });
   });
 
   it("starts with no discovered WiiM speakers", () => {
-    const { devices, settingsDeviceId } = useDeviceStore.getState();
+    const { devices, outputRecovery, settingsDeviceId } = useDeviceStore.getState();
     expect(devices).toEqual([]);
+    expect(outputRecovery).toEqual({ required: false, in_progress: false, error: null });
     expect(settingsDeviceId).toBeNull();
   });
 

@@ -35,6 +35,8 @@ export const api = {
   toggleMute: (id: string) => request("/devices/" + id + "/mute", { method: "POST" }),
   setEnabled: (id: string, enabled: boolean) =>
     request("/devices/" + id + "/enabled", { method: "POST", body: JSON.stringify({ enabled }) }),
+  getOutputState: () => request<OutputRecoveryState>("/outputs"),
+  recoverOutputs: () => request("/outputs/recover", { method: "POST" }),
   renameDevice: (id: string, name: string) =>
     request("/devices/" + id + "/name", { method: "POST", body: JSON.stringify({ name }) }),
   getLibraryState: () => request<LibraryState>("/library/state"),
@@ -214,6 +216,12 @@ export interface Device {
   is_master: boolean;
 }
 
+export interface OutputRecoveryState {
+  required: boolean;
+  in_progress: boolean;
+  error: string | null;
+}
+
 export interface BreadcrumbEntry {
   id: string;
   title: string;
@@ -280,6 +288,7 @@ export interface SessionInfo {
 export interface PlaybackState {
   target_id: string;
   playing: boolean;
+  volume: number;
   current_track: QueueTrack | null;
   position: number;
   queue_length: number;

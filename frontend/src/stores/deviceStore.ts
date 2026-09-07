@@ -1,10 +1,18 @@
 import { create } from "zustand";
-import type { Device } from "../api/client";
+import type { Device, OutputRecoveryState } from "../api/client";
+
+const IDLE_OUTPUT_RECOVERY: OutputRecoveryState = {
+  required: false,
+  in_progress: false,
+  error: null,
+};
 
 interface DeviceState {
   devices: Device[];
+  outputRecovery: OutputRecoveryState;
   settingsDeviceId: string | null;
   setDevices: (devices: Device[]) => void;
+  setOutputRecovery: (state: OutputRecoveryState) => void;
   setSettingsDevice: (id: string) => void;
   updateDevice: (id: string, update: Partial<Device>) => void;
 }
@@ -27,6 +35,7 @@ export function selectPlaybackDevice(devices: Device[]): Device | undefined {
 
 export const useDeviceStore = create<DeviceState>((set) => ({
   devices: [],
+  outputRecovery: IDLE_OUTPUT_RECOVERY,
   settingsDeviceId: null,
   setDevices: (devices) =>
     set((state) => {
@@ -41,6 +50,7 @@ export const useDeviceStore = create<DeviceState>((set) => ({
           : (wiimDevices[0]?.id ?? null),
       };
     }),
+  setOutputRecovery: (outputRecovery) => set({ outputRecovery }),
   setSettingsDevice: (id) => set({ settingsDeviceId: id }),
   updateDevice: (id, update) =>
     set((state) => ({

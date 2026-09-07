@@ -15,3 +15,4 @@ pub mod queue;
 pub mod session;
 pub mod state;
 pub mod timer;
+pub mod volume;

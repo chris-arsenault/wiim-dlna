@@ -77,15 +77,15 @@ function handleVolumeChange(
 
   log(`volumechange delta=${delta.toFixed(3)}`);
 
-  const device = selectPlaybackDevice(useDeviceStore.getState().devices);
-  if (!device) {
+  if (!selectPlaybackDevice(useDeviceStore.getState().devices)) {
     log("no playback output");
     return;
   }
 
   const direction = delta > 0 ? VOLUME_STEP : -VOLUME_STEP;
-  const newVolume = Math.max(0, Math.min(1, device.volume + direction));
-  log(`vol ${device.volume.toFixed(2)} -> ${newVolume.toFixed(2)}`);
+  const volume = usePlayerStore.getState().volume;
+  const newVolume = Math.max(0, Math.min(1, volume + direction));
+  log(`vol ${volume.toFixed(2)} -> ${newVolume.toFixed(2)}`);
   setPlaybackVolume(newVolume).catch((e) => log(`setVolume error: ${e}`));
 }
 

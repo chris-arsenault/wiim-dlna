@@ -36,20 +36,6 @@ pub struct EqState {
     pub source_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlaveInfo {
-    pub name: String,
-    pub uuid: String,
-    pub ip: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlaveListResponse {
-    pub slaves: u32,
-    #[serde(default)]
-    pub slave_list: Vec<SlaveInfo>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusEx {
     pub source: Option<String>,
@@ -268,7 +254,7 @@ impl HttpsApiClient {
     pub async fn join_group_master(&self, master_ip: &str) -> Result<(), HttpsApiError> {
         let text = self
             .command(&format!(
-                "ConnectMasterAp:JoinGroupMaster:eth{master_ip}:wifi{master_ip}"
+                "ConnectMasterAp:JoinGroupMaster:eth{master_ip}:wifi0.0.0.0"
             ))
             .await?;
         if text.trim() == "OK" {
@@ -276,6 +262,18 @@ impl HttpsApiClient {
         } else {
             Err(HttpsApiError::ApiFailed(text))
         }
+    }
+
+    /// Return this device to standalone mode when it is stuck as a follower.
+    pub async fn leave_group(&self) -> Result<(), HttpsApiError> {
+        let text = self.command("ConnectMasterAp:JoinGroupMaster:eth0").await?;
+        self.check_status(&text)
+    }
+
+    /// Dissolve the complete group led by this device.
+    pub async fn ungroup(&self) -> Result<(), HttpsApiError> {
+        let text = self.command("multiroom:Ungroup").await?;
+        self.check_status(&text)
     }
 
     /// Kick a slave (by IP) from this device's group. Must be called on the master.
@@ -288,13 +286,6 @@ impl HttpsApiClient {
         } else {
             Err(HttpsApiError::ApiFailed(text))
         }
-    }
-
-    /// Get the slave list from this device (should be called on the master).
-    pub async fn get_slave_list(&self) -> Result<SlaveListResponse, HttpsApiError> {
-        let text = self.command("multiroom:getSlaveList").await?;
-        let resp: SlaveListResponse = serde_json::from_str(&text)?;
-        Ok(resp)
     }
 
     fn check_status(&self, text: &str) -> Result<(), HttpsApiError> {
@@ -346,6 +337,41 @@ mod tests {
             "airwave-test-token",
         );
         assert_eq!(client.command("EQLoad:Office EQ").await.unwrap(), "OK");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multiroom_commands_use_bounded_recovery_payloads() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let expected = [
+                "command=ConnectMasterAp%3AJoinGroupMaster%3Aeth192.0.2.10%3Awifi0.0.0.0",
+                "command=ConnectMasterAp%3AJoinGroupMaster%3Aeth0",
+                "command=multiroom%3AUngroup",
+            ];
+            for expected_query in expected {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 4096];
+                let length = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                assert!(request.lines().next().unwrap().contains(expected_query));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nOK",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = HttpsApiClient::new(
+            format!("http://{address}/wiim/wiim-1/linkplay"),
+            "airwave-test-token",
+        );
+
+        client.join_group_master("192.0.2.10").await.unwrap();
+        client.leave_group().await.unwrap();
+        client.ungroup().await.unwrap();
         server.await.unwrap();
     }
 }

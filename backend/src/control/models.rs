@@ -94,6 +94,7 @@ pub struct QueueTrackResponse {
 pub struct PlaybackStateResponse {
     pub target_id: String,
     pub playing: bool,
+    pub volume: f64,
     pub current_track: Option<QueueTrackResponse>,
     pub position: usize,
     pub queue_length: usize,

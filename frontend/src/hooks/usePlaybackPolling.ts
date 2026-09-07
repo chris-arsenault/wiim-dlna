@@ -22,6 +22,7 @@ export function usePlaybackPolling() {
         // Batch all updates into a single set() to avoid intermediate re-renders.
         usePlayerStore.setState({
           playing: state.playing,
+          volume: state.volume,
           elapsedSeconds: state.elapsed_seconds,
           durationSeconds: state.duration_seconds,
           session,

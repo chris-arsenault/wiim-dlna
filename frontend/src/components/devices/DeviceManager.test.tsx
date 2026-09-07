@@ -4,12 +4,18 @@ import type { Device } from "../../api/client";
 import { useDeviceStore } from "../../stores/deviceStore";
 import { DeviceManager } from "./DeviceManager";
 
-const { mockSetEnabled } = vi.hoisted(() => ({
+const { mockSetEnabled, mockSetVolume, mockRecoverOutputs } = vi.hoisted(() => ({
   mockSetEnabled: vi.fn(() => Promise.resolve()),
+  mockSetVolume: vi.fn(() => Promise.resolve()),
+  mockRecoverOutputs: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("../../api/client", () => ({
-  api: { setEnabled: mockSetEnabled },
+  api: {
+    setEnabled: mockSetEnabled,
+    setVolume: mockSetVolume,
+    recoverOutputs: mockRecoverOutputs,
+  },
 }));
 
 function makeDevice(overrides: Partial<Device> = {}): Device {
@@ -41,7 +47,11 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useDeviceStore.setState({ devices: [], settingsDeviceId: null });
+  useDeviceStore.setState({
+    devices: [],
+    outputRecovery: { required: false, in_progress: false, error: null },
+    settingsDeviceId: null,
+  });
 });
 
 describe("DeviceManager", () => {
@@ -68,13 +78,13 @@ describe("DeviceManager", () => {
     );
   });
 
-  it("starts turning a speaker off without changing its stable state", async () => {
+  it("persists the desired state while the physical transition runs", async () => {
     useDeviceStore.setState({ devices: [makeDevice({ id: "a", name: "Kitchen" })] });
     render(<DeviceManager />);
     fireEvent.click(screen.getByRole("switch", { name: "Kitchen output" }));
     await waitFor(() => expect(mockSetEnabled).toHaveBeenCalledWith("a", false));
     expect(useDeviceStore.getState().devices[0]).toMatchObject({
-      enabled: true,
+      enabled: false,
       output_target: false,
     });
   });
@@ -91,6 +101,8 @@ describe("DeviceManager", () => {
     expect(screen.getByText("Turning off…")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Kitchen output" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Bedroom output" })).toBeDisabled();
+    expect(screen.getByRole("slider", { name: "Kitchen volume" })).toBeDisabled();
+    expect(screen.getByRole("slider", { name: "Bedroom volume" })).toBeDisabled();
   });
 
   it("shows a bounded transition failure returned by the server", () => {
@@ -100,13 +112,64 @@ describe("DeviceManager", () => {
     render(<DeviceManager />);
     expect(screen.getByText("timed out waiting for WiiM hardware to detach")).toBeInTheDocument();
   });
+});
 
-  it("does not expose grouping, presets, mute, or volume controls", () => {
+describe("DeviceManager recovery and volume", () => {
+  it("edits desired membership without starting hardware work after recovery fails", async () => {
+    useDeviceStore.setState({
+      devices: [makeDevice({ id: "a", name: "Kitchen" })],
+      outputRecovery: {
+        required: true,
+        in_progress: false,
+        error: "bounded recovery failed",
+      },
+    });
+    render(<DeviceManager />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "Kitchen output" }));
+    await waitFor(() => expect(mockSetEnabled).toHaveBeenCalledWith("a", false));
+    expect(useDeviceStore.getState().devices[0]).toMatchObject({
+      enabled: false,
+      output_target: null,
+    });
+    expect(screen.getByText("Wanted off")).toBeInTheDocument();
+  });
+
+  it("starts exactly one explicit recovery request", async () => {
+    useDeviceStore.setState({
+      devices: [makeDevice()],
+      outputRecovery: {
+        required: true,
+        in_progress: false,
+        error: "bounded recovery failed",
+      },
+    });
+    render(<DeviceManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Recover speakers" }));
+    await waitFor(() => expect(mockRecoverOutputs).toHaveBeenCalledTimes(1));
+    expect(useDeviceStore.getState().outputRecovery.in_progress).toBe(true);
+  });
+
+  it("exposes per-speaker volume without restoring unrelated device controls", () => {
     useDeviceStore.setState({ devices: [makeDevice()] });
     render(<DeviceManager />);
     expect(screen.queryByText("Group")).toBeNull();
     expect(screen.queryByText("Presets")).toBeNull();
     expect(screen.queryByTitle("Mute")).toBeNull();
-    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.getByRole<HTMLInputElement>("slider", { name: "Living Room volume" }).value).toBe(
+      "50"
+    );
+  });
+
+  it("commits one speaker-volume write after a slider interaction", async () => {
+    useDeviceStore.setState({ devices: [makeDevice()] });
+    render(<DeviceManager />);
+    const slider = screen.getByRole("slider", { name: "Living Room volume" });
+    fireEvent.change(slider, { target: { value: "72" } });
+    expect(mockSetVolume).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(mockSetVolume).toHaveBeenCalledWith("dev-1", 0.72));
+    expect(mockSetVolume).toHaveBeenCalledTimes(1);
   });
 });

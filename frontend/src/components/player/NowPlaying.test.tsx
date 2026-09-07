@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, fireEvent } from "@testing-library/react";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../../test-utils";
 import { NowPlaying } from "./NowPlaying";
 import { usePlayerStore } from "../../stores/playerStore";
@@ -68,6 +68,7 @@ describe("NowPlaying", () => {
     vi.clearAllMocks();
     usePlayerStore.setState({
       playing: false,
+      volume: 0.5,
       currentTrack: {
         id: "t1",
         title: "Test Song",
@@ -98,11 +99,9 @@ describe("NowPlaying", () => {
     expect(screen.getByText("Living Room")).toBeInTheDocument();
   });
 
-  it("shows the playing group volume slider", () => {
+  it("shows the main volume multiplier slider", () => {
     renderWithProviders(<NowPlaying />);
-    expect(
-      screen.getByRole<HTMLInputElement>("slider", { name: "Playing group volume" }).value
-    ).toBe("50");
+    expect(screen.getByRole<HTMLInputElement>("slider", { name: "Main volume" }).value).toBe("50");
   });
 
   it("shows formatted time", () => {
@@ -133,11 +132,15 @@ describe("NowPlaying", () => {
     expect(mockPause).toHaveBeenCalledWith();
   });
 
-  it("sets the playing group volume from the main slider", () => {
+  it("commits one main-volume write after a slider interaction", async () => {
     renderWithProviders(<NowPlaying />);
-    fireEvent.change(screen.getByRole("slider", { name: "Playing group volume" }), {
+    const slider = screen.getByRole("slider", { name: "Main volume" });
+    fireEvent.change(slider, {
       target: { value: "65" },
     });
-    expect(mockSetVolume).toHaveBeenCalledWith(0.65);
+    expect(mockSetVolume).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(mockSetVolume).toHaveBeenCalledWith(0.65));
+    expect(mockSetVolume).toHaveBeenCalledTimes(1);
   });
 });

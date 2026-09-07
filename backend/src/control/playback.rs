@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
 use crate::media::library::LibraryObject;
 use crate::wiim::device::WiimDevice;
+use tracing::warn;
 
 use super::models::{
     PlayRequest, PlaybackStateResponse, QueueAddRequest, QueueMoveRequest, QueueStateResponse,
@@ -19,14 +22,16 @@ fn playlist_source_id(source_id: &str) -> Option<i64> {
 }
 
 fn resolve_playback_device(state: &ControlState) -> Result<WiimDevice, StatusCode> {
-    if super::outputs::transition_active(&state.devices) {
+    if super::outputs::transition_active(&state.devices) || state.output_recovery.read().required {
         return Err(StatusCode::CONFLICT);
     }
     super::outputs::playback_device(&state.devices).ok_or(StatusCode::CONFLICT)
 }
 
 pub async fn get_state(State(state): State<ControlState>) -> Json<PlaybackStateResponse> {
-    let device = super::outputs::playback_device(&state.devices);
+    let device = (!state.output_recovery.read().required)
+        .then(|| super::outputs::playback_device(&state.devices))
+        .flatten();
 
     let (playing, elapsed, duration) = if let Some(device) = &device {
         let transport = device.av_transport.get_transport_info().await.ok();
@@ -113,6 +118,7 @@ pub async fn get_state(State(state): State<ControlState>) -> Json<PlaybackStateR
     Json(PlaybackStateResponse {
         target_id: PLAYBACK_TARGET_ID.to_string(),
         playing,
+        volume: *state.global_volume.read(),
         current_track,
         position,
         queue_length,
@@ -282,28 +288,54 @@ pub async fn set_volume(
     if !(0.0..=1.0).contains(&body.volume) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let device = resolve_playback_device(&state)?;
-    let volume = (body.volume * 100.0).round() as u32;
 
-    // WiiM firmware propagates SOAP SetVolume on the group master to every
-    // follower. Disabled speakers have already been detached from this group.
-    device
-        .rendering
-        .set_volume(volume)
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let _output_guard = Arc::clone(&state.output_lock)
+        .try_lock_owned()
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let _volume_guard = state.volume_lock.lock().await;
+    let previous_volume = *state.global_volume.read();
+    let mut outputs = state
+        .devices
+        .list_all()
+        .into_iter()
+        .filter(|output| output.enabled && output.device_type == "wiim")
+        .collect::<Vec<_>>();
+    outputs.sort_by(|left, right| left.id.cmp(&right.id));
 
-    for output in state.devices.list_all().into_iter().filter(|output| {
-        output.enabled && output.device_type == "wiim" && output.capabilities.rendering_control
-    }) {
+    if outputs.iter().any(|output| output.https_client.is_none()) {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let mut written: Vec<WiimDevice> = Vec::new();
+    for output in &outputs {
+        let effective = super::volume::effective_volume(output.volume, body.volume);
+        if let Err(error) = super::volume::write_effective_volume(output, effective).await {
+            warn!("Could not apply global volume to {}: {}", output.id, error);
+            for previous in written.iter().chain(std::iter::once(output)) {
+                let rollback = super::volume::effective_volume(previous.volume, previous_volume);
+                if let Err(error) = super::volume::write_effective_volume(previous, rollback).await
+                {
+                    warn!("Could not roll back volume on {}: {}", previous.id, error);
+                } else {
+                    state
+                        .devices
+                        .update(&previous.id, |device| device.applied_volume = rollback);
+                }
+            }
+            return Err(StatusCode::BAD_GATEWAY);
+        }
         state
             .devices
-            .update(&output.id, |entry| entry.volume = body.volume);
-        state.events.publish(
-            "volume_changed",
-            &serde_json::json!({ "device_id": output.id, "volume": body.volume }),
-        );
+            .update(&output.id, |device| device.applied_volume = effective);
+        written.push(output.clone());
     }
+
+    *state.global_volume.write() = body.volume;
+    super::volume::save_global_volume(&state.device_config, body.volume);
+    state.events.publish(
+        "playback_volume_changed",
+        &serde_json::json!({ "volume": body.volume }),
+    );
     Ok(StatusCode::OK)
 }
 

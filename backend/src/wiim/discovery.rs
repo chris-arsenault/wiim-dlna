@@ -78,9 +78,8 @@ async fn register_device(
     record: CollectorDevice,
     topology: RegistrationTopology,
     collector: &CollectorClient,
-    device_manager: &DeviceManager,
+    state: &ControlState,
     persisted: &std::collections::HashMap<String, crate::control::device_config::DeviceConfig>,
-    events: &EventBus,
 ) -> Option<String> {
     if !record.reachable || !is_wiim_record(&record) {
         return None;
@@ -90,14 +89,14 @@ async fn register_device(
         refresh,
     } = topology;
     let id = record.id.clone();
-    if device_manager.contains(&id) {
+    if state.devices.contains(&id) {
         if let Some(master_id) = forced_master_id.filter(|_| refresh) {
-            device_manager.update(&id, |device| {
+            state.devices.update(&id, |device| {
                 device.group_id = Some(master_id);
                 device.is_master = false;
             });
         } else if refresh {
-            refresh_group_state(&id, device_manager, events).await;
+            refresh_group_state(&id, &state.devices, &state.events).await;
         }
         return Some(id);
     }
@@ -136,7 +135,7 @@ async fn register_device(
 
     if rc_ok {
         if let Ok(volume) = device.rendering.get_volume().await {
-            device.volume = f64::from(volume) / 100.0;
+            device.applied_volume = f64::from(volume) / 100.0;
         }
         if let Ok(muted) = device.rendering.get_mute().await {
             device.muted = muted;
@@ -159,7 +158,7 @@ async fn register_device(
 
     if device.capabilities.wiim_extended {
         if let Ok(device_info) = device.rendering.get_control_device_info().await {
-            device.volume = f64::from(device_info.volume) / 100.0;
+            device.applied_volume = f64::from(device_info.volume) / 100.0;
             device.muted = device_info.muted;
             device.channel = Some(device_info.channel.clone());
             device.name = device_info
@@ -175,7 +174,7 @@ async fn register_device(
                 device.is_master = true;
                 device.group_id = Some(id.clone());
             } else if is_slave {
-                device.group_id = resolve_master_id(&device_info.raw, device_manager);
+                device.group_id = resolve_master_id(&device_info.raw, &state.devices);
             }
         }
     }
@@ -185,6 +184,26 @@ async fn register_device(
     }
     if let Some(config) = persisted.get(&id) {
         device.enabled = config.enabled;
+        device.volume = config.volume.unwrap_or(device.applied_volume);
+        if config.volume.is_none() {
+            state.device_config.save_volume(&id, device.volume);
+        }
+    } else {
+        device.volume = device.applied_volume;
+        state.device_config.save_volume(&id, device.volume);
+    }
+
+    if device.enabled && device.https_client.is_some() {
+        let _volume_guard = state.volume_lock.lock().await;
+        let effective =
+            crate::control::volume::effective_volume(device.volume, *state.global_volume.read());
+        match crate::control::volume::write_effective_volume(&device, effective).await {
+            Ok(()) => device.applied_volume = effective,
+            Err(error) => warn!(
+                "Could not restore configured volume for {} ({id}): {error}",
+                device.name
+            ),
+        }
     }
 
     info!(
@@ -197,7 +216,7 @@ async fn register_device(
         device.group_id,
         device.is_master,
     );
-    events.publish(
+    state.events.publish(
         "device_added",
         &serde_json::json!({
             "id": device.id,
@@ -206,7 +225,7 @@ async fn register_device(
             "device_type": device.device_type,
         }),
     );
-    device_manager.register(device);
+    state.devices.register(device);
     Some(id)
 }
 
@@ -239,9 +258,8 @@ pub async fn run_discovery(state: ControlState, collector: CollectorClient, inte
                     refresh: !transition_active,
                 },
                 &collector,
-                &state.devices,
+                &state,
                 &persisted,
-                &state.events,
             )
             .await
             {
@@ -289,9 +307,8 @@ pub async fn run_discovery(state: ControlState, collector: CollectorClient, inte
                                 refresh: !transition_active,
                             },
                             &collector,
-                            &state.devices,
+                            &state,
                             &persisted,
-                            &state.events,
                         )
                         .await
                         {
@@ -385,12 +402,8 @@ async fn refresh_group_state(device_id: &str, device_manager: &DeviceManager, ev
         publish_devices(device_manager, events);
     }
 
-    let volume = f64::from(device_info.volume) / 100.0;
-    if (device.volume - volume).abs() > 0.001 || device.muted != device_info.muted {
-        device_manager.update(device_id, |entry| {
-            entry.volume = volume;
-            entry.muted = device_info.muted;
-        });
+    if device.muted != device_info.muted {
+        device_manager.update(device_id, |entry| entry.muted = device_info.muted);
     }
 }
 

@@ -68,14 +68,17 @@ function AppContent() {
 
 function useInitialDeviceFetch() {
   const setDevices = useDeviceStore((s) => s.setDevices);
+  const setOutputRecovery = useDeviceStore((s) => s.setOutputRecovery);
   useEffect(() => {
     api.getDevices().then(setDevices).catch(console.error);
-  }, [setDevices]);
+    api.getOutputState().then(setOutputRecovery).catch(console.error);
+  }, [setDevices, setOutputRecovery]);
 }
 
 function useSSEHandlers() {
   const setDevices = useDeviceStore((s) => s.setDevices);
   const updateDevice = useDeviceStore((s) => s.updateDevice);
+  const setOutputRecovery = useDeviceStore((s) => s.setOutputRecovery);
   const setPlaying = usePlayerStore((s) => s.setPlaying);
   const setCurrentTrack = usePlayerStore((s) => s.setCurrentTrack);
   const setSession = usePlayerStore((s) => s.setSession);
@@ -91,9 +94,22 @@ function useSSEHandlers() {
       const { device_id, ...update } = data as { device_id: string; [key: string]: unknown };
       updateDevice(device_id, update);
     },
+    output_state_changed: (data) => {
+      setOutputRecovery(
+        data as {
+          required: boolean;
+          in_progress: boolean;
+          error: string | null;
+        }
+      );
+    },
     volume_changed: (data) => {
       const { device_id, volume } = data as { device_id: string; volume: number };
       updateDevice(device_id, { volume });
+    },
+    playback_volume_changed: (data) => {
+      const { volume } = data as { volume: number };
+      usePlayerStore.setState({ volume });
     },
     mute_changed: (data) => {
       const { device_id, muted } = data as { device_id: string; muted: boolean };
@@ -129,6 +145,7 @@ function handlePlaybackState(data: unknown) {
   const state = data as {
     target_id: string;
     playing: boolean;
+    volume: number;
     current_track: {
       id: string;
       title: string;
@@ -150,6 +167,7 @@ function handlePlaybackState(data: unknown) {
   const trackChanged = state.current_track && state.current_track.id !== currentId;
   usePlayerStore.setState({
     playing: state.playing,
+    volume: state.volume,
     elapsedSeconds: state.elapsed_seconds,
     durationSeconds: state.duration_seconds,
     session,

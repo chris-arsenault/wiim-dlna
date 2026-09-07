@@ -122,6 +122,8 @@ async fn main() {
 
     let sleep_timer_manager = control::timer::SleepTimerManager::new();
     let collector_ready = Arc::new(AtomicBool::new(false));
+    let global_volume = control::volume::load_global_volume(&device_config_store);
+    let output_recovery = control::outputs::load_recovery_state(&device_config_store);
 
     let control_state = control::state::ControlState {
         devices: device_manager.clone(),
@@ -134,6 +136,9 @@ async fn main() {
         art_cache,
         sleep_timers: sleep_timer_manager,
         output_lock: Arc::new(tokio::sync::Mutex::new(())),
+        output_recovery: Arc::new(parking_lot::RwLock::new(output_recovery)),
+        volume_lock: Arc::new(tokio::sync::Mutex::new(())),
+        global_volume: Arc::new(parking_lot::RwLock::new(global_volume)),
         base_url: cfg.base_url(),
         collector_ready: Arc::clone(&collector_ready),
     };
@@ -156,6 +161,14 @@ async fn main() {
         .route(
             "/devices/{id}/enabled",
             post(control::outputs::set_output_enabled),
+        )
+        .route(
+            "/outputs",
+            get(control::outputs::get_output_state),
+        )
+        .route(
+            "/outputs/recover",
+            post(control::outputs::recover_outputs),
         )
         .route("/devices/{id}/name", post(control::devices::rename_device))
         .route(
@@ -364,19 +377,8 @@ async fn main() {
     ));
 
     // Playback monitor (auto-advance session/queue on track end)
-    let mon_devices = device_manager;
-    let mon_queues = queue_manager;
-    let mon_sessions = session_manager;
-    let mon_events = event_bus;
-    let mon_base = cfg.base_url();
-    let mon_library = library.clone();
     tokio::spawn(control::playback_monitor::run_playback_monitor(
-        mon_devices,
-        mon_queues,
-        mon_sessions,
-        mon_events,
-        mon_base,
-        mon_library,
+        control_state.clone(),
     ));
 
     axum::serve(listener, app)

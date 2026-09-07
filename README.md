@@ -19,7 +19,11 @@ enabled as outputs. WiiM grouping remains an internal transport mechanism.
 Mobile-first web UI inspired by [Poweramp](https://powerampapp.com/). Library
 browser with search, now-playing with album art, drag-reorderable queue,
 playlists, volume control, EQ profiles, inline metadata editing, and simple
-on/off selection of the WiiM speakers that play the shared stream.
+on/off selection of the WiiM speakers that play the shared stream. Each speaker
+has an independent level; the main player volume scales all enabled speakers
+without changing their relative balance. A bounded recovery control can reset
+and rebuild a stuck physical WiiM group; if recovery fails, Airwave stops issuing
+speaker commands until another recovery is requested explicitly.
 
 ## Quick Start
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -87,22 +89,41 @@ pub async fn set_volume(
     Path(id): Path<String>,
     Json(body): Json<VolumeRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let device = state.devices.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let vol = (body.volume * 100.0).round() as u32;
-    // Prefer HTTPS API — SOAP SetVolume on a master syncs to all slaves (firmware behavior)
-    if let Some(ref https) = device.https_client {
-        https
-            .set_volume(vol)
-            .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    } else {
-        device
-            .rendering
-            .set_volume(vol)
-            .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    if !(0.0..=1.0).contains(&body.volume) {
+        return Err(StatusCode::BAD_REQUEST);
     }
-    state.devices.update(&id, |d| d.volume = body.volume);
+    let device = state.devices.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    if device.device_type != "wiim" {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Volume and topology share this boundary: a level cannot be written to a
+    // speaker while the same speaker is being detached or joined.
+    let _output_guard = Arc::clone(&state.output_lock)
+        .try_lock_owned()
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let _volume_guard = state.volume_lock.lock().await;
+    let device = state.devices.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let effective = super::volume::effective_volume(body.volume, *state.global_volume.read());
+
+    if device.enabled {
+        super::volume::write_effective_volume(&device, effective)
+            .await
+            .map_err(|error| match error {
+                super::volume::VolumeWriteError::DirectControlUnavailable(_) => {
+                    StatusCode::CONFLICT
+                }
+                super::volume::VolumeWriteError::Write { .. } => StatusCode::BAD_GATEWAY,
+            })?;
+    }
+
+    state.devices.update(&id, |d| {
+        d.volume = body.volume;
+        if d.enabled {
+            d.applied_volume = effective;
+        }
+    });
+    state.device_config.save_volume(&id, body.volume);
     state.events.publish(
         "volume_changed",
         &serde_json::json!({ "device_id": id, "volume": body.volume }),

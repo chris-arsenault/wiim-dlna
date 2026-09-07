@@ -50,14 +50,18 @@ pub struct WiimDevice {
     pub firmware: Option<String>,
     pub udn: String,
     pub device_type: String,
+    /// Persisted desired participation in the one Airwave playing group.
     pub enabled: bool,
-    /// Requested logical output state while WiiM hardware converges. The
-    /// stable `enabled` value does not change until the transition completes.
+    /// Desired state currently being reconciled with WiiM hardware.
     pub output_target: Option<bool>,
-    /// Last bounded output-transition failure, cleared by the next request.
+    /// Last bounded output-transition failure. The global recovery latch owns
+    /// whether hardware commands may run again.
     pub output_error: Option<String>,
     pub capabilities: DeviceCapabilities,
+    /// User-controlled per-speaker base level before global scaling.
     pub volume: f64,
+    /// Last physical volume observed or written after global scaling.
+    pub applied_volume: f64,
     pub muted: bool,
     pub channel: Option<String>,
     pub source: Option<String>,
@@ -121,6 +125,7 @@ impl WiimDevice {
             output_error: None,
             capabilities: params.capabilities,
             volume: 0.0,
+            applied_volume: 0.0,
             muted: false,
             channel: None,
             source: None,

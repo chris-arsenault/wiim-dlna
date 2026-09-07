@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::debug;
@@ -7,21 +6,25 @@ use tracing::debug;
 use super::events::EventBus;
 use super::models::QueueTrackResponse;
 use super::queue::QueueManager;
-use super::session::SessionManager;
-use super::state::PLAYBACK_TARGET_ID;
+use super::state::{ControlState, PLAYBACK_TARGET_ID};
 use crate::media::library::{LibraryObject, SharedLibrary};
-use crate::wiim::device::DeviceManager;
 
 /// Background task that monitors playback state, auto-advances
 /// sessions/queues when a track finishes, and broadcasts state over SSE.
-pub async fn run_playback_monitor(
-    devices: Arc<DeviceManager>,
-    queues: Arc<QueueManager>,
-    sessions: Arc<SessionManager>,
-    events: EventBus,
-    base_url: String,
-    library: SharedLibrary,
-) {
+pub async fn run_playback_monitor(state: ControlState) {
+    let ControlState {
+        devices,
+        queues,
+        sessions,
+        events,
+        base_url,
+        library,
+        global_volume,
+        volume_lock,
+        device_config,
+        output_recovery,
+        ..
+    } = state;
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     let mut last_states: HashMap<String, String> = HashMap::new();
     let mut initialized: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -34,20 +37,40 @@ pub async fn run_playback_monitor(
         let current_device_ids: std::collections::HashSet<String> =
             all_devices.iter().map(|device| device.id.clone()).collect();
         initialized.retain(|id| current_device_ids.contains(id));
+        let transition_active = all_devices
+            .iter()
+            .any(|device| device.output_target.is_some())
+            || output_recovery.read().required;
 
-        // Volume and mute remain physical-device settings even though playback
-        // is global, so keep every WiiM's rendering state current.
+        // Keep each WiiM's observed rendering state current. A physical volume
+        // change is converted back to its base level only outside transitions.
         for device in &all_devices {
             if device.capabilities.rendering_control {
-                if let Ok(vol) = device.rendering.get_volume().await {
-                    let new_vol = vol as f64 / 100.0;
-                    if (new_vol - device.volume).abs() > 0.005 {
-                        devices.update(&device.id, |d| d.volume = new_vol);
-                        events.publish(
-                            "volume_changed",
-                            &serde_json::json!({ "device_id": device.id, "volume": new_vol }),
-                        );
+                let changed_base = {
+                    let _volume_guard = volume_lock.lock().await;
+                    if let Ok(vol) = device.rendering.get_volume().await {
+                        let new_vol = vol as f64 / 100.0;
+                        let infer_base_volume = !transition_active;
+                        let mut changed_base = None;
+                        devices.update(&device.id, |entry| {
+                            changed_base = super::volume::reconcile_observed_volume(
+                                entry,
+                                new_vol,
+                                *global_volume.read(),
+                                infer_base_volume && entry.enabled,
+                            );
+                        });
+                        changed_base
+                    } else {
+                        None
                     }
+                };
+                if let Some(volume) = changed_base {
+                    device_config.save_volume(&device.id, volume);
+                    events.publish(
+                        "volume_changed",
+                        &serde_json::json!({ "device_id": device.id, "volume": volume }),
+                    );
                 }
                 if let Ok(muted) = device.rendering.get_mute().await {
                     if muted != device.muted {
@@ -64,10 +87,7 @@ pub async fn run_playback_monitor(
         // Group transitions can make the stable playback owner report
         // STOPPED for tens of seconds. Treat that as topology work, not a
         // track end, or the monitor will advance the global queue by itself.
-        if all_devices
-            .iter()
-            .any(|device| device.output_target.is_some())
-        {
+        if transition_active {
             last_playback_device = None;
             last_states.clear();
             continue;
@@ -181,6 +201,7 @@ pub async fn run_playback_monitor(
             elapsed,
             duration,
             allowed_actions.as_ref(),
+            *global_volume.read(),
         );
     }
 }
@@ -434,6 +455,7 @@ fn broadcast_playback_state(
     elapsed: f64,
     duration: f64,
     allowed_actions: Option<&Vec<String>>,
+    volume: f64,
 ) {
     let session_guard = session_lock.read();
     let (current_track, pos, queue_length, shuffle_mode, repeat_mode, session_info) =
@@ -497,6 +519,7 @@ fn broadcast_playback_state(
         &serde_json::json!({
             "target_id": PLAYBACK_TARGET_ID,
             "playing": playing,
+            "volume": volume,
             "current_track": current_track,
             "position": pos,
             "queue_length": queue_length,

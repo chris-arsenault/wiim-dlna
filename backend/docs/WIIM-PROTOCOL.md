@@ -1,6 +1,6 @@
 # WiiM Device Protocol Reference
 
-Reverse-engineered protocol details for WiiM Mini (Linkplay-based) devices. These devices expose three network interfaces, each serving different functions. None of this is officially documented.
+Protocol details for WiiM Mini (Linkplay-based) devices. These devices expose three network interfaces, each serving different functions. Most behavior below was established against the devices directly; the recovery commands are additionally checked against Linkplay's published router-mode API.
 
 Tested on: WiiM Mini, firmware `Linkplay.4.6.805929`, hardware `ALLWINNER-R328`.
 
@@ -52,11 +52,14 @@ GET http://{ip}:5356/zc?action=getInfo
 Send to each **slave** device:
 
 ```
-GET https://{slave_ip}/httpapi.asp?command=ConnectMasterAp:JoinGroupMaster:eth{master_ip}:wifi{master_ip}
+GET https://{slave_ip}/httpapi.asp?command=ConnectMasterAp:JoinGroupMaster:eth{master_ip}:wifi0.0.0.0
 → OK
 ```
 
-The `eth` and `wifi` prefixes are part of the Linkplay protocol. For WiFi-only devices like WiiM Mini, both are set to the same IP.
+The `eth` and `wifi` prefixes are part of the Linkplay protocol. Airwave uses
+the documented router-mode form: the master address follows `eth`, and the
+unused peer address is `0.0.0.0`. The previous payload put the master address
+in both fields; a device could acknowledge it without changing topology.
 
 An `OK` response acknowledges the command; it does not mean the multiroom
 topology has converged. WiiM hardware can take 30–60 seconds to finish a join
@@ -64,17 +67,46 @@ or detach. Airwave therefore sends each topology command once, polls
 `GetInfoEx` for up to 90 seconds per phase, and requires two complete matching
 topology observations five seconds apart. Any mismatch or read failure resets
 that stability count. Airwave rejects overlapping output changes while that
-observation is pending. A timeout is surfaced to the user and is not retried
-automatically.
+observation is pending.
+
+A direct transition timeout starts one bounded recovery epoch; it does not
+repeat the failed delta. Recovery resets every present WiiM to standalone,
+stops outputs desired off, and builds the complete desired group once. If that
+also fails, Airwave persists a recovery-required latch and sends no more group
+commands until the user explicitly requests another recovery. It also makes one
+best-effort software stop on every WiiM: if the hardware cannot separate an off
+speaker from the playing group, Airwave fails silent instead of leaving that
+speaker attached to an active stream.
 
 ### Dissolving a Group
 
-Send to the **master** device, once per slave:
+To remove one follower while retaining the rest of the group, send to the
+master:
 
 ```
-GET https://{master_ip}/httpapi.asp?command=multiroom:SlaveKickout:{slave_ip}
+GET https://{master_ip}/httpapi.asp?command=multiroom:SlaveKickout:{follower_ip}
 → OK
 ```
+
+Send once to the **master** device to split the complete group:
+
+```
+GET https://{master_ip}/httpapi.asp?command=multiroom:Ungroup
+→ OK
+```
+
+During recovery Airwave sends this once to every present WiiM because a stale
+device may disagree with Airwave about which unit is the master. If the
+subsequent topology sample still identifies a follower, Airwave sends that
+follower one local standalone command:
+
+```
+GET https://{follower_ip}/httpapi.asp?command=ConnectMasterAp:JoinGroupMaster:eth0
+→ OK
+```
+
+Both stages are bounded. Observed topology decides whether they succeeded;
+`OK` alone never does.
 
 ### Querying Group State
 
@@ -98,11 +130,14 @@ GET https://{master_ip}/httpapi.asp?command=multiroom:getSlaveList
 
 ### Group State is Device-Canonical
 
-The device is the single source of truth for completed group state. Other apps
+The device is the single source of truth for observed group state. Other apps
 (WiiM app, Spotify) can create or dissolve groups at any time. Airwave reads
 group state during discovery, but suppresses those intermediate observations
 while one of its own topology transitions is pending. Airwave persists desired
-on/off output membership, not physical group membership.
+on/off output membership immediately, separately from the physical group fields.
+After a recovery failure, later toggle changes update that desired state but do
+not operate the speakers. The explicit recovery action consumes the latest
+desired set.
 
 ### WiiM App vs Our Grouping
 
@@ -173,7 +208,12 @@ The HTTPS API does NOT have this behavior:
 | HTTPS `setPlayerCmd:vol:{N}` on slave | No — slave only |
 | HTTPS `multiroom:SlaveVolume:{ip}:{vol}` | No — sets specific slave only |
 
-Our server uses `setPlayerCmd:vol` (HTTPS) to avoid group crosstalk, falling back to SOAP only for non-WiiM renderers.
+Airwave admits only WiiM renderers and uses `setPlayerCmd:vol` for every volume
+write. It does not fall back to SOAP because doing so could flatten the group.
+Each device has a persisted base level, while the main player volume is a
+persisted multiplier. Airwave writes `round(base × main × 100)` to each enabled
+device. A newly enabled device receives that effective level before joining the
+playing group.
 
 The `multiroom:getSlaveList` response includes each slave's current volume and mute state.
 

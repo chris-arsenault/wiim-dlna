@@ -5,6 +5,7 @@ describe("playerStore", () => {
   beforeEach(() => {
     usePlayerStore.setState({
       playing: false,
+      volume: 1,
       currentTrack: null,
       elapsedSeconds: 0,
       durationSeconds: 0,
@@ -16,11 +17,17 @@ describe("playerStore", () => {
   it("starts with default state", () => {
     const state = usePlayerStore.getState();
     expect(state.playing).toBe(false);
+    expect(state.volume).toBe(1);
     expect(state.currentTrack).toBeNull();
     expect(state.elapsedSeconds).toBe(0);
     expect(state.durationSeconds).toBe(0);
     expect(state.shuffleMode).toBe("off");
     expect(state.repeatMode).toBe("off");
+  });
+
+  it("stores the global volume multiplier", () => {
+    usePlayerStore.getState().setVolume(0.65);
+    expect(usePlayerStore.getState().volume).toBe(0.65);
   });
 
   it("setPlaying toggles playing state", () => {

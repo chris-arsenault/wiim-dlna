@@ -3,6 +3,7 @@ import type { QueueTrack, SessionInfo } from "../api/client";
 
 interface PlayerState {
   playing: boolean;
+  volume: number;
   currentTrack: QueueTrack | null;
   elapsedSeconds: number;
   durationSeconds: number;
@@ -13,6 +14,7 @@ interface PlayerState {
   rating: number;
   sleepRemaining: number | null;
   setPlaying: (playing: boolean) => void;
+  setVolume: (volume: number) => void;
   setCurrentTrack: (track: QueueTrack | null) => void;
   setElapsed: (seconds: number) => void;
   setDuration: (seconds: number) => void;
@@ -26,6 +28,7 @@ interface PlayerState {
 
 export const usePlayerStore = create<PlayerState>((set) => ({
   playing: false,
+  volume: 1,
   currentTrack: null,
   elapsedSeconds: 0,
   durationSeconds: 0,
@@ -36,6 +39,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   rating: 0,
   sleepRemaining: null,
   setPlaying: (playing) => set({ playing }),
+  setVolume: (volume) => set({ volume }),
   setCurrentTrack: (track) => set({ currentTrack: track, rating: 0 }),
   setElapsed: (seconds) => set({ elapsedSeconds: seconds }),
   setDuration: (seconds) => set({ durationSeconds: seconds }),
