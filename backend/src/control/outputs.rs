@@ -1121,11 +1121,38 @@ fn follower_ids_from_slave_list(slave_list: &str, known_ids: &[String]) -> HashS
 
 fn normalize_device_id(id: &str, known_ids: &[String]) -> String {
     let normalized = id.trim().trim_start_matches("uuid:");
-    known_ids
+    let mut matches = known_ids
         .iter()
-        .find(|known| known.eq_ignore_ascii_case(normalized))
-        .cloned()
-        .unwrap_or_else(|| normalized.to_string())
+        .filter(|known| device_ids_match(normalized, known));
+    let matched = matches.next();
+
+    match (matched, matches.next()) {
+        (Some(known), None) => known.clone(),
+        _ => normalized.to_string(),
+    }
+}
+
+fn device_ids_match(observed: &str, known: &str) -> bool {
+    if known.eq_ignore_ascii_case(observed) {
+        return true;
+    }
+
+    let observed = compact_device_id(observed);
+    let known = compact_device_id(known);
+    observed == known
+        || is_linkplay_group_id_alias(&observed, &known)
+        || is_linkplay_group_id_alias(&known, &observed)
+}
+
+fn compact_device_id(id: &str) -> String {
+    id.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn is_linkplay_group_id_alias(short: &str, long: &str) -> bool {
+    short.len() == 24 && long.len() == 32 && long.starts_with(short) && long[..8] == long[24..]
 }
 
 fn apply_physical_topology(devices: &DeviceManager, topology: &PhysicalTopology) {
@@ -1470,6 +1497,38 @@ mod tests {
         assert_eq!(
             physical_role_from_info("0", "", r#"{"slaves":"1"}"#, &ids),
             PhysicalRole::Master
+        );
+    }
+
+    #[test]
+    fn linkplay_short_group_ids_are_normalized_to_collector_device_ids() {
+        let master = "FF970016-4482-2673-19D4-D9E8FF970016".to_string();
+        let follower = "FF970016-11F4-0A59-9E9E-3551FF970016".to_string();
+        let ids = vec![master.clone(), follower.clone()];
+
+        assert_eq!(
+            physical_role_from_info("1", "FF9700164482267319D4D9E8", "{}", &ids),
+            PhysicalRole::Follower(master)
+        );
+        assert_eq!(
+            follower_ids_from_slave_list(
+                r#"{"slaves":"1","slave_list":[{"uuid":"FF97001611F40A599E9E3551"}]}"#,
+                &ids,
+            ),
+            HashSet::from([follower])
+        );
+    }
+
+    #[test]
+    fn ambiguous_group_id_alias_is_not_assigned_to_a_device() {
+        let ids = vec![
+            "FF970016-4482-2673-19D4-D9E8FF970016".to_string(),
+            "FF9700164482267319D4D9E8FF970016".to_string(),
+        ];
+
+        assert_eq!(
+            normalize_device_id("FF9700164482267319D4D9E8", &ids),
+            "FF9700164482267319D4D9E8"
         );
     }
 
